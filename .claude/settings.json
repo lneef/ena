@@ -1,0 +1,13 @@
+{
+  "hooks" : {
+    "PreToolUse" : [ {
+      "matcher" : "Read|Grep|Glob|Bash|Write|Edit",
+      "hooks" : [ {
+        "type" : "command",
+        "command" : "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/ref_guard.py"
+      } ]
+    } ]
+  },
+  "env" : {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" : "1"},
+  "teammateMode" : "in-process"
+}
