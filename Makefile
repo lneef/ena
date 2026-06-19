@@ -5,6 +5,11 @@ QEMU_REF := v11.0.1
 QEMU_TARGETS := x86_64-softmmu
 QEMU_PRIMARY_TARGET := x86_64-softmmu
 
+# ninja targets built for a clean build: the emulator plus the qtest harness.
+# Building these directly avoids the qemu-nbd / selinux.h breakage hit by a
+# full `make -C build`.
+QEMU_NINJA_TARGETS := qemu-system-x86_64 tests/qtest/qos-test
+
 # In-tree glue (meson/Kconfig/qtest wiring) is kept out of the submodule and
 # applied as a patch at build time, so the qemu submodule stays clean across
 # worktrees. ena.c and the tests themselves live in this repo.
@@ -19,9 +24,16 @@ QEMU_CFLAGS := \
 	-I$(QEMU_BUILD_DIR)/$(QEMU_PRIMARY_TARGET) \
 	-I$(QEMU_BUILD_DIR)/$(QEMU_PRIMARY_TARGET)/qapi
 
-.PHONY: qemu-init qemu-patch qemu-unpatch qemu-configure qemu-build qemu-compile-commands qemu-clean print-qemu-cflags
+.DEFAULT_GOAL := build
+.PHONY: build clean setup print-qemu-cflags qemu-patch qemu-unpatch qemu-configure
 
-qemu-init:
+# ---------------------------------------------------------------------------
+# Primary entry points
+# ---------------------------------------------------------------------------
+
+# One-time setup: fetch/check out the pinned qemu submodule. Run this once
+# after cloning; build/clean never touch the submodule themselves.
+setup:
 	@if [ -d "$(QEMU_DIR)/.git" ] && \
 		[ "$$(git -C "$(QEMU_DIR)" describe --tags --exact-match 2>/dev/null)" = "$(QEMU_REF)" ]; then \
 		:; \
@@ -34,9 +46,25 @@ qemu-init:
 		git clone --branch "$(QEMU_REF)" --depth 1 "$(QEMU_URL)" "$(QEMU_DIR)"; \
 	fi
 
+# Build everything: (re)apply the ENA glue, configure if needed, then build the
+# emulator and qtest harness via ninja and refresh compile_commands.json.
+# Requires `make setup` to have checked out the qemu submodule first.
+build: qemu-configure
+	ninja -C "$(QEMU_BUILD_DIR)" $(QEMU_NINJA_TARGETS)
+	cp "$(QEMU_BUILD_DIR)/compile_commands.json" "compile_commands.json"
+
+# Wipe everything: drop the build directory and revert the glue so the qemu
+# submodule is left clean.
+clean: qemu-unpatch
+	rm -rf "$(QEMU_BUILD_DIR)"
+
+# ---------------------------------------------------------------------------
+# Internal machinery (used by build/clean)
+# ---------------------------------------------------------------------------
+
 # Apply the ENA glue into the submodule. Idempotent: a no-op if already
 # applied, an error only if the tree has drifted so the patch no longer fits.
-qemu-patch: qemu-init
+qemu-patch:
 	@cd "$(QEMU_DIR)" && \
 	if git apply --reverse --check "$(ENA_PATCH)" >/dev/null 2>&1; then \
 		echo "ena glue already applied"; \
@@ -48,15 +76,16 @@ qemu-patch: qemu-init
 	fi
 
 qemu-unpatch:
-	@cd "$(QEMU_DIR)" && \
-	if git apply --reverse --check "$(ENA_PATCH)" >/dev/null 2>&1; then \
-		git apply --reverse "$(ENA_PATCH)" && echo "reverted ena glue"; \
-	else \
-		echo "ena glue not applied; nothing to revert"; \
+	@if [ -d "$(QEMU_DIR)/.git" ]; then \
+		cd "$(QEMU_DIR)" && \
+		if git apply --reverse --check "$(ENA_PATCH)" >/dev/null 2>&1; then \
+			git apply --reverse "$(ENA_PATCH)" && echo "reverted ena glue"; \
+		else \
+			echo "ena glue not applied; nothing to revert"; \
+		fi; \
 	fi
 
 $(QEMU_BUILD_DIR)/config-host.mak:
-	$(MAKE) qemu-init
 	mkdir -p "$(QEMU_BUILD_DIR)"
 	cd "$(QEMU_BUILD_DIR)" && ../configure \
 		--target-list="$(QEMU_TARGETS)" \
@@ -67,23 +96,6 @@ $(QEMU_BUILD_DIR)/config-host.mak:
 # every configure/build even when config-host.mak already exists. meson detects
 # the changed meson.build and regenerates the ninja graph on the next build.
 qemu-configure: qemu-patch $(QEMU_BUILD_DIR)/config-host.mak
-
-compile_commands.json:
-	$(MAKE) qemu-configure
-	cp "$(QEMU_BUILD_DIR)/compile_commands.json" "$@"
-
-qemu-compile-commands:
-	$(MAKE) compile_commands.json
-	cp "$(QEMU_BUILD_DIR)/compile_commands.json" "compile_commands.json"
-
-qemu-build: qemu-configure
-	$(MAKE) -C "$(QEMU_BUILD_DIR)"
-	cp "$(QEMU_BUILD_DIR)/compile_commands.json" "compile_commands.json"
-
-qemu-clean:
-	@if [ -d "$(QEMU_BUILD_DIR)" ]; then \
-		$(MAKE) -C "$(QEMU_BUILD_DIR)" clean; \
-	fi
 
 print-qemu-cflags:
 	@printf '%s\n' "$(QEMU_CFLAGS)"

@@ -213,116 +213,18 @@ ambiguous/ignored by the reference driver.
 
 ## 4. GET_STATS admin command (opcode 11)
 
-`ENA_ADMIN_GET_STATS = 11`. [userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:36]
+GET_STATS is the counter-retrieval admin command. Its request/response struct
+layouts, the per-`type` payloads (BASIC / ENI / ENA_SRD / CUSTOMER_METRICS), the
+customer-metrics negotiation, and the device-vs-driver split now live in their
+own page: **[statistics.md](statistics.md)**.
 
-### Request `struct ena_admin_aq_get_stats_cmd`
-[userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:400-428]
-```
-struct ena_admin_aq_get_stats_cmd {
-    struct ena_admin_aq_common_desc aq_common_descriptor;
-    union {
-        u32 inline_data_w1[3];
-        struct ena_admin_ctrl_buff_info control_buffer; /* addr+length */
-    } u;
-    u8  type;        /* enum ena_admin_get_stats_type */
-    u8  scope;       /* enum ena_admin_get_stats_scope */
-    u16 reserved3;
-    u16 queue_idx;   /* used when scope == SPECIFIC_QUEUE */
-    u16 device_id;   /* 0xFFFF == "mine"; privileged only for others */
-    u64 requested_metrics; /* bitmap, customer-metrics only */
-};
-```
-`enum ena_admin_get_stats_type`: BASIC=0, EXTENDED=1, ENI=2, ENA_SRD=3,
-CUSTOMER_METRICS=4. [userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:132-141]
-`enum ena_admin_get_stats_scope`: SPECIFIC_QUEUE=0, ETH_TRAFFIC=1.
-[userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:143-146]
-
-How the reference fills it: `ena_get_dev_stats` zeroes the whole ctx and sets
-only `opcode`, `flags=0`, and `type`. [userspace/dpdk/ena/base/ena_com.c:2249-2274]
-Therefore (explicit, by omission + memset at callers
-[userspace/dpdk/ena/base/ena_com.c:2648, 2288, 2679; ena_ethdev.c:4174-4179]):
-- `scope = 0` (SPECIFIC_QUEUE encoding, but left as the zero default).
-- `queue_idx = 0`.
-- `device_id = 0` — **not** 0xFFFF. There is no `ENA_ADMIN_DEVICE_ID_ANY`
-  symbol anywhere in the DPDK or kernel `ena_com` (grep: absent). The device
-  must treat `device_id = 0` as "this function / mine".
-  Ambiguity: the struct comment ("0xFFFF == mine") suggests 0xFFFF is the
-  documented self-reference value, yet the drivers only ever send 0 — an
-  emulated device should accept both 0 and 0xFFFF as "mine".
-- `requested_metrics` only set for CUSTOMER_METRICS.
-  [userspace/dpdk/ena/base/ena_com.c:2289, 2689]
-
-Inferred: for BASIC/ENI/ENA_SRD the device returns whole-device counters and
-must ignore scope/queue_idx (they are left zero, never populated). Only the
-customer-metrics path sets a control buffer + `requested_metrics`.
-
-### Response `struct ena_admin_acq_get_stats_resp`
-[userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:522-536] — `acq_common_desc`
-followed by a union (`u64 raw[7]`) overlaying the stats structs.
-
-`struct ena_admin_basic_stats` (14 x u32, lo/hi 64-bit pairs):
-[userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:431-459]
-```
-tx_bytes_low/high, tx_pkts_low/high,
-rx_bytes_low/high, rx_pkts_low/high,
-rx_drops_low/high, tx_drops_low/high,
-rx_overruns_low/high
-```
-Copied verbatim by `ena_com_get_dev_basic_stats`.
-[userspace/dpdk/ena/base/ena_com.c:2642-2655]
-
-`struct ena_admin_eni_stats` (5 x u64): bw_in_allowance_exceeded,
-bw_out_allowance_exceeded, pps_allowance_exceeded,
-conntrack_allowance_exceeded, linklocal_allowance_exceeded.
-[userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:462-486]; fetched by
-`ena_com_get_eni_stats` with type=ENI. [userspace/dpdk/ena/base/ena_com.c:2602-2620]
-
-`struct ena_admin_ena_srd_info` = `u64 flags`
-(`ena_admin_ena_srd_flags`) + `struct ena_admin_ena_srd_stats`
-(ena_srd_tx_pkts, ena_srd_eligible_tx_pkts, ena_srd_rx_pkts,
-ena_srd_resource_utilization). [userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:488-512];
-`ena_com_get_ena_srd_info` type=ENA_SRD. [userspace/dpdk/ena/base/ena_com.c:2622-2640]
-
-`struct ena_admin_customer_metrics` = `u64 reported_metrics` bitmap.
-[userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:515-520]
-
-### Customer metrics path (DPDK uses it)
-- Capability gate: `ena_com_get_cap(ENA_ADMIN_CUSTOMER_METRICS)`.
-  [userspace/dpdk/ena/base/ena_com.c:2283, 2668]
-- A dedicated DMA buffer is allocated once: `buffer_len =
-  ENA_CUSTOMER_METRICS_BUFFER_SIZE`. [userspace/dpdk/ena/base/ena_com.c:3242-3256]
-- Supported-metrics negotiation: at init, sends GET_STATS type=CUSTOMER_METRICS
-  with `requested_metrics = ENA_ADMIN_CUSTOMER_METRICS_SUPPORT_MASK`; the
-  device replies `u.customer_metrics.reported_metrics`, stored as
-  `supported_metrics`. [userspace/dpdk/ena/base/ena_com.c:2276-2294, 2380]
-- Fetch: `ena_com_get_customer_metrics` sets `u.control_buffer.address/length`
-  to the DMA buffer, `requested_metrics = supported_metrics`, issues GET_STATS,
-  then `memcpy`s `buffer_len` bytes out of the DMA buffer.
-  [userspace/dpdk/ena/base/ena_com.c:2657-2696]
-- Metric IDs (`enum ena_admin_customer_metrics_id`): BW_IN/BW_OUT/PPS/
-  CONNTRACK_EXCEEDED/LINKLOCAL_EXCEEDED/CONNTRACK_AVAILABLE (0..5).
-  [userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:20-27]
-
-So for customer metrics the device writes the metric values into the
-driver-supplied control buffer (DMA), not into the inline response.
-
-### When the driver fetches stats (explicit)
-On demand, from DPDK ethdev callbacks — **not** on the periodic timer:
-- `ena_stats_get` (rte basic stats) and the `xstats_get*` family.
-  [userspace/dpdk/ena/ena_ethdev.c:264, 334-338]
-- `ena_copy_customer_metrics` prefers CUSTOMER_METRICS, falls back to ENI
-  stats if only `ENA_ADMIN_ENI_STATS` cap is present.
-  [userspace/dpdk/ena/ena_ethdev.c:3315-3356]
-- `ena_copy_ena_srd_info` fetches SRD info if `ENA_ADMIN_ENA_SRD_INFO` cap.
-  [userspace/dpdk/ena/ena_ethdev.c:3358-3377]
-- All wrapped in `adapter->admin_lock`. In multi-process mode the secondary
-  proxies the request to the primary (`ENA_MP_*` requests dispatched in
-  `ena_mp_primary_handle`). [userspace/dpdk/ena/ena_ethdev.c:4172-4204]
-
-Inferred: there is no fixed polling cadence for GET_STATS; frequency is
-whatever the application calls `rte_eth_stats_get` / `rte_eth_xstats_get`.
-The only periodic device->driver liveness signal is the keep-alive AENQ
-(section 5), not GET_STATS.
+Health-relevant points only:
+- GET_STATS is fetched **on demand** from ethdev callbacks, **not** on the
+  periodic timer; it is not a liveness signal. The only periodic
+  device→driver stats signal is the keep-alive AENQ (section 5).
+- A GET_STATS that the device accepts but never completes within the admin
+  completion timeout clears `running_state` and triggers an **ADMIN_TO (2)**
+  reset, exactly like any other admin command — see section 3.
 
 ---
 
@@ -339,14 +241,10 @@ Full payload struct, phase handling, and hint override are in
 - Required cadence (inferred from defaults): comfortably under **3 s** to
   satisfy DPDK (kernel allows 6 s). Both overridable via UPDATE_HINTS
   `driver_watchdog_timeout` (ms; 0xFFFF disables). [aenq.md]
-- Payload counters the device fills (`struct ena_admin_aenq_keep_alive_desc`,
-  lo/hi 64-bit pairs): `rx_drops`, `tx_drops`, `rx_overruns`. These are
-  cumulative since last device reset. [userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h:1239-1253]
-- DPDK consumes them as `drv_stats->rx_drops = rx_drops + rx_overruns` and
-  `dev_stats.tx_drops = tx_drops` (note: rx_overruns folded into rx_drops).
-  [userspace/dpdk/ena/ena_ethdev.c:4095-4104]
-- Kernel stores all three separately in `dev_stats.ka_stats`.
-  [kernel/linux/ena/ena_netdev.c:6061-6072]
+- The descriptor also carries `rx_drops` / `tx_drops` / `rx_overruns` counters
+  the device fills; that stats payload and how each driver consumes it are
+  documented in [statistics.md](statistics.md) §3, §4. The watchdog itself only
+  cares that an entry arrives in time, not about the counter values.
 
 ---
 
@@ -436,13 +334,9 @@ Explicit (cited):
 - **NOTIFICATION syndromes other than UPDATE_HINTS (2)** — logged as error,
   ignored. §6. [userspace/dpdk/ena/ena_ethdev.c:4076-4079]
 - **Debug-area contents** — written region never read back. §7.
-- **GET_STATS scope / queue_idx / device_id fields** — drivers leave them
-  zero; per-queue and cross-device stats requests are never issued, so any
-  device support for them is unexercised. §4.
-- **rx_overruns keep-alive counter** under DPDK — not surfaced separately; it
-  is folded into `rx_drops`. §5. [userspace/dpdk/ena/ena_ethdev.c:4103]
-- **EXTENDED stats type (1)** — enum exists but no reference caller issues
-  `ENA_ADMIN_GET_STATS_TYPE_EXTENDED`. §4.
+- **Stats fields the drivers never exercise** — GET_STATS
+  `scope`/`queue_idx`/`device_id`, the EXTENDED stats type, and the DPDK
+  rx_overruns fold-in: see [statistics.md](statistics.md) §1, §2, §4.
 
 Inferred:
 - Reset reasons are diagnostic granularity for the host's own logging; the
@@ -456,10 +350,10 @@ Inferred:
 - Explicit (cited to code): timer cadence and ordering; all timeout/threshold
   constants (3 s / 6 s keep-alive, 5 s TX-to, thresholds 256/128, budgets
   3/4); reset reasons each check sets; running_state clear paths and 3 s admin
-  timeout; GET_STATS opcode/struct layouts and field-by-field response;
-  customer-metrics negotiation/fetch; keep-alive payload; AENQ group
-  subscription and handler presence/absence; HOST_ATTR_CONFIG layout and the
-  allocate/set-only debug-area lifecycle; ignored-features list.
+  timeout; AENQ group subscription and handler presence/absence;
+  HOST_ATTR_CONFIG layout and the allocate/set-only debug-area lifecycle;
+  ignored-features list. (Statistics struct layouts and the
+  customer-metrics negotiation moved to [statistics.md](statistics.md).)
 - Inferred (reasoning over cited code, no single line proves device behavior):
   required device keep-alive cadence (< 3 s); device must complete every
   accepted TX/admin command within the windows or be reset; device treats

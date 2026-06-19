@@ -250,12 +250,41 @@ the host-info page; it is **non-fatal**
 - `mac_addr[6]` (network byte order) — copied to `eth_dev->data->mac_addrs`
   [userspace/dpdk/ena/ena_ethdev.c:2410-2414].
 - `max_mtu` — stored as `adapter->max_mtu`
-  [userspace/dpdk/ena/ena_ethdev.c:2406].
+  [userspace/dpdk/ena/ena_ethdev.c:2406]. See "max_mtu semantics" below.
 - `supported_features` bitmap (of `ena_admin_aq_feature_id`) →
   `ena_dev->supported_features` [userspace/dpdk/ena/ena_com.c:2312].
 - `capabilities` bitmap → `ena_dev->capabilities`
   [userspace/dpdk/ena/ena_com.c:2313].
 - `phys_addr_width` / `virt_addr_width`.
+
+#### max_mtu semantics
+- **No reference-mandated value.** `max_mtu` is a runtime `uint32_t`
+  [ena_admin_defs.h:583]; the reference has no `ENA_MAX_MTU` / jumbo upper
+  constant. The only MTU constants are lower bounds: `ENA_MIN_MTU = 128`
+  [ena_ethdev.h:35], `ENA_MIN_FRAME_LEN = 64` [ena_ethdev.h:26] (Linux mirrors
+  `ENA_MIN_MTU = 128` [kernel/linux/ena/ena_netdev.h:87]). (explicit — absence
+  of any max constant)
+- **It is the L3 payload MTU** (IP-payload bytes, excluding Ethernet
+  header/CRC). The driver adds framing on top:
+  `max_rx_pktlen = max_mtu + RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN`
+  [ena_ethdev.c:2638-2639]. (explicit)
+- **Contract: `configured_mtu <= max_mtu`.** DPDK does not clamp in the PMD —
+  `ena_mtu_set` forwards the request via SET_FEATURE `ENA_ADMIN_MTU`
+  [ena_ethdev.c:1284-1304], [ena_com.c:2699-2716]; the framework enforces the
+  bound against `dev_info->max_mtu = adapter->max_mtu` /
+  `min_mtu = ENA_MIN_MTU` [ena_ethdev.c:2640-2641]. Linux clamps explicitly:
+  `ena_change_mtu` rejects `> adapter->max_mtu || < ENA_MIN_MTU`
+  [kernel/linux/ena/ena_netdev.c:207-212], with a probe-time check failing if
+  `dev_attr.max_mtu < netdev->mtu` [ena_netdev.c:4205-4209]. (explicit)
+- **9001 is not a device attribute.** The well-known EC2 jumbo MTU 9001 is an
+  instance/ENI L3-payload size set by the network config (encapsulation
+  headroom), not anything the device reports; it appears nowhere in the
+  reference. The device only needs to advertise `max_mtu >=` the guest's
+  intended MTU. Our emulation hardcodes `ENA_DEV_MAX_MTU = 9001` [hw/ena.c:41]
+  — a valid (not reference-mandated) ceiling that matches the common EC2 jumbo
+  payload, so a guest configuring up to 9001 still passes `configured_mtu <=
+  max_mtu`. The true value real hardware reports is control-plane /
+  instance-type assigned and not derivable from these sources. (inferred)
 
 It then reads further features in sequence (the device must answer or return
 unsupported): `MAX_QUEUES_EXT` (if `supported_features` bit set) or

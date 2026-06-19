@@ -50,10 +50,23 @@ When editing existing code:
 ### Best Practices
 - Use proper include paths from the project(subproject) root
 
+## Setup
+The QEMU source lives in the `qemu` submodule (pinned to the tag in the
+Makefile). Initialize it once after cloning, before the first build:
+```
+make setup   # or: git submodule update --init --recursive qemu
+```
+`make build` does not touch the submodule, so run `make setup` first.
+
+## Building
+```
+make build   # build emulator + qtest harness, refresh compile_commands.json
+make clean   # wipe the build dir and revert the in-tree qemu glue
+```
+
 ## Verification
 ```
-make qemu-build
-make qemu-compile-commands
+make build
 
 # Run the qtest harness that compiles tests/ena_test.c.
 cd qemu/build

@@ -10,10 +10,12 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "qemu/units.h"
 #include "qemu/bswap.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/msix.h"
+#include "net/net.h"
 #include "qom/object.h"
 
 #include "ena_regs.h"
@@ -36,7 +38,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(EnaState, ENA)
 /* Device identity reported in GET_FEATURE(DEVICE_ATTRIBUTES). */
 #define ENA_DEV_PHYS_ADDR_WIDTH 48
 #define ENA_DEV_VIRT_ADDR_WIDTH 48
-#define ENA_DEV_MAX_MTU         9216
+#define ENA_DEV_MAX_MTU        9001 
 
 /* AENQ groups the device can ever produce (GET_FEATURE(AENQ_CONFIG)). */
 #define ENA_AENQ_SUPPORTED_GROUPS \
@@ -44,10 +46,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(EnaState, ENA)
      (1u << ENA_ADMIN_WARNING) | (1u << ENA_ADMIN_NOTIFICATION) | \
      (1u << ENA_ADMIN_KEEP_ALIVE))
 
-/* supported_features bitmap in the DEVICE_ATTRIBUTES response. */
+/* supported_features bitmap in the DEVICE_ATTRIBUTES response. STATELESS_-
+ * OFFLOAD_CONFIG is advertised so the driver's mandatory GET(11) is answered
+ * (with an all-zero, i.e. no-offload, descriptor — offloads.md §1); RSS/hash
+ * features are deliberately omitted (no offloads except inherent RX scatter). */
 #define ENA_SUPPORTED_FEATURES \
     ((1u << ENA_ADMIN_DEVICE_ATTRIBUTES) | (1u << ENA_ADMIN_MTU) | \
-     (1u << ENA_ADMIN_AENQ_CONFIG) | (1u << ENA_ADMIN_LLQ))
+     (1u << ENA_ADMIN_AENQ_CONFIG) | (1u << ENA_ADMIN_LLQ) | \
+     (1u << ENA_ADMIN_STATELESS_OFFLOAD_CONFIG))
 
 /* IO queue limits and the per-SQ doorbell window inside BAR0. The device
  * hands each created SQ a doorbell offset of ENA_IO_SQ_DB_BASE + sq_idx*4;
@@ -68,6 +74,21 @@ OBJECT_DECLARE_SIMPLE_TYPE(EnaState, ENA)
 
 /* TX SQ descriptor size (sizeof(struct ena_eth_io_tx_desc)). */
 #define ENA_TX_DESC_SIZE    16
+
+/* RX SQ buffer descriptor / RX completion descriptor sizes. */
+#define ENA_RX_DESC_SIZE    16  /* sizeof(struct ena_eth_io_rx_desc) */
+#define ENA_RX_CDESC_SIZE   16  /* sizeof(struct ena_eth_io_rx_cdesc_base) */
+
+/* SQ direction Rx (sq_identity bits 7:5); Tx is ENA_ADMIN_SQ_DIRECTION_TX. */
+#define ENA_ADMIN_SQ_DIRECTION_RX       2
+
+/* Max RX buffers one frame may be scattered across (ENA_PKT_MAX_BUFS, the
+ * driver's per-packet SGL ceiling; rx-path.md §2.4). A frame needing more
+ * posted buffers than this is dropped. */
+#define ENA_RX_MAX_SGL      17
+
+/* An rx_desc.length of 0 means 64 KiB (rx-path.md §2.1). */
+#define ENA_RX_DESC_LEN_64K 65536
 
 /*
  * LLQ (low-latency queue) device memory (BAR2, the "MEM BAR"). LLQ TX SQs push
@@ -114,6 +135,16 @@ struct EnaState {
     MemoryRegion mmio;
     MemoryRegion mem_bar;   /* BAR2: LLQ device memory */
     uint8_t *llq_mem;       /* host pointer to mem_bar backing RAM */
+
+    /* NIC backend: frames from the QEMU network layer land in ena_rx_receive,
+     * which scatters them into posted RX SQ buffers (rx-path.md). */
+    NICState *nic;
+    NICConf  conf;
+
+    /* Deferred TX processing: a doorbell latches the SQ tail and arms this BH,
+     * which drains the TX SQs out of the MMIO write path (tx-path.md §2). */
+    QEMUBH   *tx_bh;
+    bool     tx_scheduled;  /* BH armed/in-progress — avoid redundant schedule */
 
     /* driver-programmed configuration (write-only registers) */
     uint32_t aq_base_lo, aq_base_hi, aq_caps;
@@ -200,6 +231,10 @@ static void ena_cfg_reset(EnaState *s)
 
     memset(s->io_cq, 0, sizeof(s->io_cq));
     memset(s->io_sq, 0, sizeof(s->io_sq));
+
+    /* A pending TX BH finds no valid SQs after this and no-ops; allow a
+     * post-reset doorbell to re-arm it. */
+    s->tx_scheduled = false;
 }
 
 static uint32_t ena_reg_read(EnaState *s, hwaddr addr)
@@ -326,6 +361,22 @@ static void ena_get_aenq_config(EnaState *s, uint16_t cmd_id)
 }
 
 /*
+ * GET_FEATURE(STATELESS_OFFLOAD_CONFIG): emit struct
+ * ena_admin_feature_offload_desc (3 x u32 = tx / rx_supported / rx_enabled,
+ * offloads.md §1). We advertise NO stateless offloads — no TX/RX checksum, no
+ * TSO, no RX hash — so all three words are zero. RX scatter is inherent to the
+ * multi-buffer Rx datapath and is not an admin-advertised offload, so nothing
+ * is set for it here. The feature is GET-only (the driver never SETs it).
+ */
+static void ena_get_offload_config(EnaState *s, uint16_t cmd_id)
+{
+    uint8_t desc[12];
+
+    memset(desc, 0, sizeof(desc));
+    ena_acq_complete(s, cmd_id, ENA_ADMIN_SUCCESS, desc, sizeof(desc));
+}
+
+/*
  * GET_FEATURE(LLQ): emit struct ena_admin_feature_llq_desc (llq.md §2). We
  * support inline-header mode with 128B/256B entries and single/multiple stride;
  * the supported bitmaps let the driver pick, the enabled fields are echoed back
@@ -366,6 +417,9 @@ static void ena_handle_get_feature(EnaState *s, const uint8_t *cmd,
         break;
     case ENA_ADMIN_LLQ:
         ena_get_llq_config(s, cmd_id);
+        break;
+    case ENA_ADMIN_STATELESS_OFFLOAD_CONFIG:
+        ena_get_offload_config(s, cmd_id);
         break;
     default:
         qemu_log_mask(LOG_UNIMP, "ena: GET_FEATURE of unsupported feature %u\n",
@@ -786,21 +840,21 @@ static void ena_tx_cq_post(EnaState *s, uint16_t cq_idx, uint16_t sub_qid,
 }
 
 /*
- * Consume TX SQ @sq_idx up to the doorbell-supplied producer @tail. Walk the
- * host-memory descriptor ring from the device's head, accumulating each packet
- * from its first data descriptor through the one with LAST set, and post one
- * completion per packet whose first descriptor requested one (tx-path.md
- * §1, §4). req_id and comp_req are taken from the first data descriptor of the
- * packet (tx-descriptors.md §4). Offload meta descriptors (bit 23) are skipped
- * — offloads are out of scope for the core datapath.
+ * Consume TX SQ @sq_idx up to the latched producer tail (sq->tail, set by the
+ * doorbell). Walk the host-memory descriptor ring from the device's head,
+ * accumulating each packet from its first data descriptor through the one with
+ * LAST set, and post one completion per packet whose first descriptor requested
+ * one (tx-path.md §1, §4). req_id and comp_req are taken from the first data
+ * descriptor of the packet (tx-descriptors.md §4). Offload meta descriptors
+ * (bit 23) are skipped — offloads are out of scope for the core datapath.
  */
-static void ena_tx_sq_process(EnaState *s, uint16_t sq_idx, uint16_t tail)
+static void ena_tx_sq_process(EnaState *s, uint16_t sq_idx)
 {
     struct EnaIoSq *sq = &s->io_sq[sq_idx];
     bool in_packet = false, comp_req = false;
     uint16_t req_id = 0;
 
-    while (sq->head != tail) {
+    while (sq->head != sq->tail) {
         struct ena_eth_io_tx_desc d;
         uint32_t idx = sq->head & (sq->depth - 1);
         uint32_t len_ctrl, meta_ctrl;
@@ -835,18 +889,18 @@ static void ena_tx_sq_process(EnaState *s, uint16_t sq_idx, uint16_t tail)
 
 /*
  * LLQ variant of ena_tx_sq_process: the descriptor ring lives in device memory
- * (MEM BAR slice), and @sq->head / @tail are line (entry) indices, not
+ * (MEM BAR slice), and sq->head / sq->tail are line (entry) indices, not
  * descriptor indices. Each packet starts at a fresh line; the first line holds
  * up to llq_descs_before_header descriptors (16B each) followed by the inline
  * header, and any overflow descriptors spill to the start of subsequent lines
  * (llq_descs_per_entry each). We walk descriptors honouring that layout to find
  * FIRST..LAST, then advance head past the packet's last line (llq.md §6, §9).
  */
-static void ena_tx_llq_process(EnaState *s, uint16_t sq_idx, uint16_t tail)
+static void ena_tx_llq_process(EnaState *s, uint16_t sq_idx)
 {
     struct EnaIoSq *sq = &s->io_sq[sq_idx];
 
-    while (sq->head != tail) {
+    while (sq->head != sq->tail) {
         uint16_t line = sq->head;
         uint8_t slot = 0;
         uint8_t descs_in_line = sq->llq_descs_before_header;
@@ -895,6 +949,178 @@ static void ena_tx_llq_process(EnaState *s, uint16_t sq_idx, uint16_t tail)
     }
 }
 
+/*
+ * Deferred TX task: armed by a TX SQ doorbell, runs out of the MMIO write path.
+ * Drain every TX SQ that has descriptors published up to its latched tail
+ * (tx-path.md §2). Clearing tx_scheduled first lets a doorbell arriving while
+ * we run re-arm the task, so its newly published descriptors get drained on the
+ * next run rather than being lost.
+ */
+static void ena_tx_bh(void *opaque)
+{
+    EnaState *s = opaque;
+
+    s->tx_scheduled = false;
+
+    for (int idx = 0; idx < ENA_MAX_IO_QUEUES; idx++) {
+        struct EnaIoSq *sq = &s->io_sq[idx];
+
+        if (!sq->valid || sq->direction != ENA_ADMIN_SQ_DIRECTION_TX) {
+            continue;
+        }
+        if (sq->llq) {
+            ena_tx_llq_process(s, idx);
+        } else {
+            ena_tx_sq_process(s, idx);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* RX datapath (host placement, polling)                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Post one RX completion descriptor to CQ @cq_idx for a consumed buffer: echo
+ * @req_id and the per-buffer @length, set FIRST on the packet's first buffer
+ * and LAST on its last, stamp the CQ's current producer phase (status bit 24),
+ * then advance the CQ producer, flipping the phase bit on ring wrap
+ * (rx-path.md §4, rx-descriptors.md). offset/hash/sub_qid are left zero (the
+ * driver reads offset as a data offset into the first buffer; we place at 0).
+ * The 16-byte cdesc is published in one DMA write so its body is coherent with
+ * the phase bit the driver polls on.
+ */
+static void ena_rx_cq_post(EnaState *s, uint16_t cq_idx, uint16_t req_id,
+                           uint16_t length, bool first, bool last)
+{
+    struct EnaIoCq *cq = &s->io_cq[cq_idx];
+    struct ena_eth_io_rx_cdesc_base cdesc;
+    uint32_t idx = cq->tail & (cq->depth - 1);
+    uint32_t status = (cq->phase & 1) << ENA_ETH_IO_RX_CDESC_BASE_PHASE_SHIFT;
+
+    if (first) {
+        status |= ENA_ETH_IO_RX_CDESC_BASE_FIRST_MASK;
+    }
+    if (last) {
+        status |= ENA_ETH_IO_RX_CDESC_BASE_LAST_MASK;
+    }
+
+    memset(&cdesc, 0, sizeof(cdesc));
+    cdesc.status = cpu_to_le32(status);
+    cdesc.length = cpu_to_le16(length);
+    cdesc.req_id = cpu_to_le16(req_id);
+
+    pci_dma_write(PCI_DEVICE(s), cq->base + (dma_addr_t)idx * ENA_RX_CDESC_SIZE,
+                  &cdesc, sizeof(cdesc));
+
+    cq->tail++;
+    if ((cq->tail & (cq->depth - 1)) == 0) {
+        cq->phase ^= 1;
+    }
+}
+
+/* Read the RX SQ buffer descriptor at absolute index @pos (rx-path.md §2.1). */
+static void ena_rx_read_desc(EnaState *s, struct EnaIoSq *sq, uint16_t pos,
+                             struct ena_eth_io_rx_desc *d)
+{
+    uint32_t idx = pos & (sq->depth - 1);
+
+    pci_dma_read(PCI_DEVICE(s), sq->base + (dma_addr_t)idx * ENA_RX_DESC_SIZE,
+                 d, sizeof(*d));
+}
+
+static uint32_t ena_rx_desc_capacity(const struct ena_eth_io_rx_desc *d)
+{
+    uint16_t len = le16_to_cpu(d->length);
+
+    return len ? len : ENA_RX_DESC_LEN_64K;
+}
+
+/* Locate the first valid RX SQ, or NULL if none is set up. The datapath tests
+ * use a single RX queue; a multi-queue device would steer by RSS here. */
+static struct EnaIoSq *ena_rx_find_sq(EnaState *s)
+{
+    for (int i = 0; i < ENA_MAX_IO_QUEUES; i++) {
+        if (s->io_sq[i].valid &&
+            s->io_sq[i].direction == ENA_ADMIN_SQ_DIRECTION_RX) {
+            return &s->io_sq[i];
+        }
+    }
+    return NULL;
+}
+
+/*
+ * QEMU network backend RX callback. Scatter one incoming frame across the
+ * posted RX SQ buffers (one cdesc per buffer, FIRST..LAST), or DROP it if it
+ * cannot be placed — too few posted buffers, insufficient total capacity, or
+ * more buffers than the SGL ceiling (rx-path.md §3, §7). A dropped frame writes
+ * no cdesc and consumes no buffer; the device stays ready. Returning @size in
+ * all cases tells the net layer the frame was consumed (not re-queued).
+ *
+ * Available buffers span [head, tail): the doorbell latched the driver's
+ * absolute SQ tail (rx-path.md §2.2), head is the device's consumer cursor.
+ */
+static ssize_t ena_rx_receive(NetClientState *nc, const uint8_t *buf,
+                              size_t size)
+{
+    EnaState *s = qemu_get_nic_opaque(nc);
+    struct EnaIoSq *sq = ena_rx_find_sq(s);
+    struct ena_eth_io_rx_desc descs[ENA_RX_MAX_SGL];
+    uint16_t avail, nbufs = 0;
+    size_t remaining = size;
+    size_t off = 0;
+    int i;
+
+    if (!sq) {
+        return size; /* no RX queue: drop */
+    }
+    avail = (uint16_t)sq->tail - sq->head;
+
+    /* Walk posted buffers until the frame is covered, bounded by the posted
+     * count and the SGL ceiling. Falling short of @size on either bound means
+     * the frame cannot be placed. */
+    while (remaining > 0 && nbufs < avail && nbufs < ENA_RX_MAX_SGL) {
+        ena_rx_read_desc(s, sq, sq->head + nbufs, &descs[nbufs]);
+        remaining -= MIN(remaining, ena_rx_desc_capacity(&descs[nbufs]));
+        nbufs++;
+    }
+    if (remaining > 0) {
+        return size; /* cannot place the whole frame: drop */
+    }
+
+    /* Place the frame: DMA each chunk into its buffer and post its cdesc. */
+    for (i = 0; i < nbufs; i++) {
+        uint32_t cap = ena_rx_desc_capacity(&descs[i]);
+        size_t chunk = MIN(size - off, cap);
+        uint64_t addr = le32_to_cpu(descs[i].buff_addr_lo) |
+                        ((uint64_t)le16_to_cpu(descs[i].buff_addr_hi) << 32);
+
+        pci_dma_write(PCI_DEVICE(s), addr, buf + off, chunk);
+        ena_rx_cq_post(s, sq->cq_idx, le16_to_cpu(descs[i].req_id), chunk,
+                       i == 0, i == nbufs - 1);
+        off += chunk;
+    }
+    sq->head += nbufs;
+
+    return size;
+}
+
+/* Accept frames whenever the device is ready; unplaceable frames are dropped
+ * in ena_rx_receive (so an out-of-buffers frame is dropped, not re-queued). */
+static bool ena_rx_can_receive(NetClientState *nc)
+{
+    EnaState *s = qemu_get_nic_opaque(nc);
+
+    return s->dev_sts & ENA_REGS_DEV_STS_READY_MASK;
+}
+
+static NetClientInfo net_ena_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .can_receive = ena_rx_can_receive,
+    .receive = ena_rx_receive,
+};
+
 static void ena_dev_ctl_write(EnaState *s, uint32_t val)
 {
     if (val & ENA_REGS_DEV_CTL_DEV_RESET_MASK) {
@@ -917,20 +1143,18 @@ static void ena_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
     uint32_t val = val64;
 
     /* Per-SQ doorbell window (queue-setup.md §4): the driver writes the new SQ
-     * tail. For a TX SQ, consume the newly published descriptors and post
-     * completions (tx-path.md §2). */
+     * tail. For a TX SQ, latch the tail and schedule the deferred task to
+     * retrieve and process the published descriptors (tx-path.md §2). */
     if (addr >= ENA_IO_SQ_DB_BASE &&
         addr < ENA_IO_SQ_DB_OFF(ENA_MAX_IO_QUEUES)) {
         uint32_t idx = (addr - ENA_IO_SQ_DB_BASE) / 4;
 
         if (s->io_sq[idx].valid) {
             s->io_sq[idx].tail = val;
-            if (s->io_sq[idx].direction == ENA_ADMIN_SQ_DIRECTION_TX) {
-                if (s->io_sq[idx].llq) {
-                    ena_tx_llq_process(s, idx, val);
-                } else {
-                    ena_tx_sq_process(s, idx, val);
-                }
+            if (s->io_sq[idx].direction == ENA_ADMIN_SQ_DIRECTION_TX &&
+                !s->tx_scheduled) {
+                s->tx_scheduled = true;
+                qemu_bh_schedule(s->tx_bh);
             }
         } else {
             qemu_log_mask(LOG_GUEST_ERROR,
@@ -1029,10 +1253,23 @@ static void ena_realize(PCIDevice *pci_dev, Error **errp)
 
     msix_init_exclusive_bar(pci_dev, ENA_MSIX_VECTORS, ENA_MSIX_BAR_IDX,
                             errp);
+
+    s->tx_bh = qemu_bh_new_guarded(ena_tx_bh, s,
+                                   &DEVICE(s)->mem_reentrancy_guard);
+
+    qemu_macaddr_default_if_unset(&s->conf.macaddr);
+    s->nic = qemu_new_nic(&net_ena_info, &s->conf,
+                          object_get_typename(OBJECT(s)), DEVICE(s)->id,
+                          &DEVICE(s)->mem_reentrancy_guard, s);
+    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
 }
 
 static void ena_exit(PCIDevice *pci_dev)
 {
+    EnaState *s = ENA(pci_dev);
+
+    qemu_bh_delete(s->tx_bh);
+    qemu_del_nic(s->nic);
     msix_uninit_exclusive_bar(pci_dev);
 }
 
@@ -1043,6 +1280,10 @@ static void ena_reset_hold(Object *obj, ResetType type)
     ena_cfg_reset(s);
     s->dev_sts = ENA_REGS_DEV_STS_READY_MASK;
 }
+
+static const Property ena_properties[] = {
+    DEFINE_NIC_PROPERTIES(EnaState, conf),
+};
 
 static void ena_class_init(ObjectClass *klass, const void *data)
 {
@@ -1059,6 +1300,7 @@ static void ena_class_init(ObjectClass *klass, const void *data)
     rc->phases.hold = ena_reset_hold;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->desc = "Amazon Elastic Network Adapter (stub)";
+    device_class_set_props(dc, ena_properties);
 }
 
 static const TypeInfo ena_info = {

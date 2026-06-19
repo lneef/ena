@@ -486,6 +486,9 @@ extended/string output. The response `ena_admin_acq_get_stats_resp`
 (customer metrics, extended) attach a control buffer with its DMA
 address/length. [ena_com.c:2680-2690] (explicit)
 
+Full per-`type` payload layouts, the device-vs-driver split, and the
+customer-metrics negotiation are in [statistics.md](statistics.md).
+
 ---
 
 ## 8. Device-boundary contract summary

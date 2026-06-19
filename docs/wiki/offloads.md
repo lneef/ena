@@ -107,6 +107,45 @@ only `ena_admin_defs.h`) (explicit, by absence). The driver treats
 `rx_supported` as authoritative. The device should populate `rx_supported`
 meaningfully; `rx_enabled` is informational and not relied upon by this driver.
 
+### Init dependency — GET(11) is gated and fatal if absent
+
+The GET goes through `ena_com_get_feature` → `ena_com_get_feature_ex`, which
+first calls `ena_com_check_supported_feature_id` [ena_com.c:1044-1047,
+1020-1031] (explicit): if bit 11 is **clear** in the device's
+`supported_features`, no admin command is issued and the call returns
+`ENA_COM_UNSUPPORTED`. In `ena_com_get_dev_attr_feat` the offload read is
+followed by a bare `if (rc) return rc;` [ena_com.c:2351-2352] (explicit) — so a
+clear bit **or** an UNSUPPORTED admin completion to GET(11) aborts
+`ena_com_get_dev_attr_feat` → `ena_device_init` → probe. Unlike the HW_HINTS and
+LLQ reads just below it (which `memset` to zero on `ENA_COM_UNSUPPORTED`
+[ena_com.c:2360-2378]), the offload read has **no** zero-fallback. So "feature
+absent" is **not** equivalent to "no offloads": a device must advertise bit 11
+and answer GET(11), never omit it.
+
+### Minimal / zero-offload device advertisement
+
+To advertise **no** stateless offloads (the QEMU emulation's target):
+- set bit 11 (`STATELESS_OFFLOAD_CONFIG`) in DEVICE_ATTRIBUTES
+  `supported_features`;
+- answer GET(11) with an all-zero `ena_admin_feature_offload_desc`
+  (`tx = rx_supported = rx_enabled = 0`). `ena_set_offloads` then leaves
+  `tx_offloads = rx_offloads = 0`, so no checksum/TSO is offered and the clear
+  `RX_HASH` bit means `RTE_ETH_RX_OFFLOAD_RSS_HASH` is not advertised
+  [ena_ethdev.c:2206-2247, 2556-2557] (explicit);
+- leave RSS_HASH_FUNCTION(10) / RSS_HASH_INPUT(18) unadvertised (not read at
+  init), `capabilities = 0`, and LLQ `accel_mode = 0`.
+
+**RX scatter is not an offload here.** The PMD forces `scattered_rx = 1`
+("cannot be turned off in HW") and ORs `RTE_ETH_RX_OFFLOAD_SCATTER` into the port
+offloads with no feature/capability gate [ena_ethdev.c:2492-2495, 2559]
+(explicit) — it is inherent to multi-buffer Rx, never advertised via an admin
+feature, and needs no device-side advertisement.
+
+Note: a *full* DPDK probe additionally GET-reads RSS_INDIRECTION_TABLE_CONFIG(12)
+inside `ena_com_rss_init` and aborts if absent [ena_ethdev.c:2416-2420;
+ena_com.c:1178-1198] (explicit). That is RSS-table plumbing, not a stateless
+offload, and is out of scope for offload advertisement.
+
 ---
 
 ## 2. TX-side offload encoding (device contract)
