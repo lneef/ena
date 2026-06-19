@@ -81,8 +81,9 @@ def main() -> None:
             cmd = tool_input.get("command", "") or ""
             if BASH_WRITE_RE.search(cmd) and WIKI_MARKER not in cmd:
                 deny(
-                    "inspector may only write under docs/wiki/. "
-                    "Use Read/Grep for research; record findings in the wiki."
+                        str(tool_input)
+                    #"inspector may only write under docs/wiki/. "
+                    #"Use Read/Grep for research; record findings in the wiki."
                 )
         sys.exit(0)
 
