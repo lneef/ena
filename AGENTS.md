@@ -16,6 +16,10 @@ docs/ENA.md is a short overview on ENA taken from the Linux Kernel
 - If you findout that you did not use registers/fields that seems vital to your current task check their behavior against the wiki
 - The hardware device spec lives in wiki. Use this as first reference point when doing research. PROACTIVELY consult the reference implementation if
 the wiki does not hold all information required or is ambiguous. 
+- Use proper include paths from the project(subproject) root
+- Write idiomatic code interfacing with QEMU:
+    - If you are uncertain about exact behavior (preconditions/postconsitions/guarantees) of QEMU-Functionality, look it up
+    - Before implementing new functionality at the Device-QEMU-interface yourself, you have to ensure that there is no QEMU-freature you can use
 
 ### 1. Think Before Coding
 
@@ -46,9 +50,6 @@ Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, sim
 When editing existing code:
 - Don't "improve" adjacent code, comments, or formatting.
 - Don't refactor things that aren't broken.
-
-### Best Practices
-- Use proper include paths from the project(subproject) root
 
 ## Setup
 The QEMU source lives in the `qemu` submodule (pinned to the tag in the
