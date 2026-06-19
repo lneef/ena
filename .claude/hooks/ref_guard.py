@@ -14,7 +14,7 @@
 #         (= no decision, normal permission flow applies)
 #
 # No external dependencies (deliberately no jq — a missing dependency
-# would make a bash/jq version fail open).
+                            # would make a bash/jq version fail open).
 
 import json
 import re
@@ -28,8 +28,8 @@ WIKI_MARKER = "docs/wiki"
 
 # Bash constructs that can write files
 BASH_WRITE_RE = re.compile(
-    r"(>|>>|\btee\b|\bcp\b|\bmv\b|\binstall\b|\bsed\b[^|;]*-i|\brm\b|\btruncate\b|\bdd\b)"
-)
+        r"(>|>>|\btee\b|\bcp\b|\bmv\b|\binstall\b|\bsed\b[^|;]*-i|\brm\b|\btruncate\b|\bdd\b)"
+        )
 
 
 def deny(reason: str) -> None:
@@ -38,8 +38,8 @@ def deny(reason: str) -> None:
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
-        }
-    }))
+            }
+        }))
     sys.exit(0)
 
 
@@ -50,8 +50,8 @@ def main() -> None:
         # Unparseable input: fail closed rather than open.
         deny("refs-guard hook could not parse tool input; blocking as a precaution.")
         return
-
-    print(data)
+    with open("dump.json") as f:
+        json.dump(data, f, indent=2)
     tool = data.get("tool_name", "") or ""
     agent = data.get("agent_type") or "main"
     tool_input = data.get("tool_input") or {}
@@ -60,10 +60,10 @@ def main() -> None:
         paths = tool_input.get("command", "") or ""
     else:
         paths = " ".join(
-            str(tool_input.get(k))
-            for k in ("file_path", "path", "pattern", "notebook_path")
-            if tool_input.get(k)
-        )
+                str(tool_input.get(k))
+                for k in ("file_path", "path", "pattern", "notebook_path")
+                if tool_input.get(k)
+                )
 
     touches_refs = REFS_MARKER in paths
 
@@ -81,9 +81,9 @@ def main() -> None:
             cmd = tool_input.get("command", "") or ""
             if BASH_WRITE_RE.search(cmd) and WIKI_MARKER not in cmd:
                 deny(
-                    "inspector may only write under docs/wiki/. "
-                    "Use Read/Grep for research; record findings in the wiki."
-                )
+                        "inspector may only write under docs/wiki/. "
+                        "Use Read/Grep for research; record findings in the wiki."
+                        )
         sys.exit(0)
 
     # -----------------------------------------------------------------
@@ -91,11 +91,11 @@ def main() -> None:
     # -----------------------------------------------------------------
     if touches_refs:
         deny(
-            "refs/ is delegated context. Spawn the ena-inspector subagent "
-            "with a specific question instead of reading reference sources "
-            "directly. Settled facts live in docs/wiki/ and the contract "
-            "docs in docs/."
-        )
+                "refs/ is delegated context. Spawn the ena-inspector subagent "
+                "with a specific question instead of reading reference sources "
+                "directly. Settled facts live in docs/wiki/ and the contract "
+                "docs in docs/."
+                )
 
     sys.exit(0)
 
