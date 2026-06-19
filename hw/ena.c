@@ -144,7 +144,6 @@ struct EnaState {
     /* Deferred TX processing: a doorbell latches the SQ tail and arms this BH,
      * which drains the TX SQs out of the MMIO write path (tx-path.md §2). */
     QEMUBH   *tx_bh;
-    bool     tx_scheduled;  /* BH armed/in-progress — avoid redundant schedule */
 
     /* driver-programmed configuration (write-only registers) */
     uint32_t aq_base_lo, aq_base_hi, aq_caps;
@@ -231,10 +230,7 @@ static void ena_cfg_reset(EnaState *s)
 
     memset(s->io_cq, 0, sizeof(s->io_cq));
     memset(s->io_sq, 0, sizeof(s->io_sq));
-
-    /* A pending TX BH finds no valid SQs after this and no-ops; allow a
-     * post-reset doorbell to re-arm it. */
-    s->tx_scheduled = false;
+    /* A still-pending TX BH finds no valid SQs after this and no-ops. */
 }
 
 static uint32_t ena_reg_read(EnaState *s, hwaddr addr)
@@ -952,15 +948,13 @@ static void ena_tx_llq_process(EnaState *s, uint16_t sq_idx)
 /*
  * Deferred TX task: armed by a TX SQ doorbell, runs out of the MMIO write path.
  * Drain every TX SQ that has descriptors published up to its latched tail
- * (tx-path.md §2). Clearing tx_scheduled first lets a doorbell arriving while
- * we run re-arm the task, so its newly published descriptors get drained on the
- * next run rather than being lost.
+ * (tx-path.md §2). qemu_bh_schedule() clears the BH's pending flag before
+ * invoking us, so a doorbell arriving while we run re-arms the task and its
+ * newly published descriptors get drained on the next run rather than lost.
  */
 static void ena_tx_bh(void *opaque)
 {
     EnaState *s = opaque;
-
-    s->tx_scheduled = false;
 
     for (int idx = 0; idx < ENA_MAX_IO_QUEUES; idx++) {
         struct EnaIoSq *sq = &s->io_sq[idx];
@@ -1151,9 +1145,8 @@ static void ena_mmio_write(void *opaque, hwaddr addr, uint64_t val64,
 
         if (s->io_sq[idx].valid) {
             s->io_sq[idx].tail = val;
-            if (s->io_sq[idx].direction == ENA_ADMIN_SQ_DIRECTION_TX &&
-                !s->tx_scheduled) {
-                s->tx_scheduled = true;
+            if (s->io_sq[idx].direction == ENA_ADMIN_SQ_DIRECTION_TX) {
+                /* Idempotent: a no-op if the BH is already pending. */
                 qemu_bh_schedule(s->tx_bh);
             }
         } else {
