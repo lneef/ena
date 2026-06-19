@@ -7,7 +7,7 @@ the reference driver (`ena_com_prepare_tx`, `ena_com_create_meta`, and the
 DPDK PMD `ena_tx_mbuf_prepare`) fills each field.
 
 Reference driver: AWS DPDK PMD (`userspace/dpdk/ena`). Paths below are
-relative to `~/ena/amzn-drivers/`. All bit/field definitions are from
+relative to `amzn-drivers/`. All bit/field definitions are from
 `userspace/dpdk/ena/base/ena_defs/ena_eth_io_defs.h`.
 
 For SQ/CQ creation, ring depth, LLQ vs host placement, doorbells and the

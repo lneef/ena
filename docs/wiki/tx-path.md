@@ -3,7 +3,7 @@
 Device-side view of the ENA transmit datapath: what the device must do from
 the moment the driver rings the SQ doorbell until it posts a TX completion.
 Citations are to the AWS DPDK reference (`userspace/dpdk/ena/`). Paths are
-relative to `~/ena/amzn-drivers/`.
+relative to `amzn-drivers/`.
 
 Related pages: [queue-setup.md](queue-setup.md) (SQ/CQ creation, doorbell
 offset, entry sizes), [llq.md](llq.md) (LLQ bounce buffers — if present),

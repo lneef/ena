@@ -6,7 +6,7 @@ on RX. "Stateless" here = per-packet checksum insertion/verification, TCP
 segmentation (TSO), and RX hashing — as opposed to stateful (connection) offload.
 
 Reference driver: AWS DPDK PMD (`userspace/dpdk/ena`). Paths below are relative
-to `~/ena/amzn-drivers/`. Bit definitions are from
+to `amzn-drivers/`. Bit definitions are from
 `userspace/dpdk/ena/base/ena_defs/ena_admin_defs.h` and
 `userspace/dpdk/ena/base/ena_defs/ena_eth_io_defs.h`.
 

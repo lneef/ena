@@ -18,7 +18,7 @@ Cross-references (do not duplicate):
 
 Sources: `userspace/dpdk/ena/` (DPDK PMD) and `kernel/linux/ena/` +
 `kernel/linux/common/ena_com/`. Paths below are relative to
-`~/ena/amzn-drivers/`.
+`amzn-drivers/`.
 
 ---
 

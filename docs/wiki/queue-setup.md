@@ -4,7 +4,7 @@ How the driver builds and tears down a datapath queue pair via the admin
 queue, what the device must return, and the ordering / handle conventions.
 
 Reference driver: AWS DPDK PMD (`userspace/dpdk/ena`). Paths below are
-relative to `~/ena/amzn-drivers/`.
+relative to `amzn-drivers/`.
 
 For the on-wire TX SQ descriptor, TX metadata descriptor, and TX completion
 descriptor bit layouts (the contents of the SQ/CQ slots created here) see

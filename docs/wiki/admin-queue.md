@@ -12,7 +12,7 @@ Unless noted, evidence is from the AWS DPDK PMD
 (`userspace/dpdk/ena/base/...`). The Linux kernel and FreeBSD `ena_com`
 copies are byte-identical for everything documented here; cross-cites are
 given where a kernel-only function matters. Paths are relative to
-`~/ena/amzn-drivers/`.
+`amzn-drivers/`.
 
 Cross-references (not duplicated here):
 - AQ/ACQ/AENQ **register** programming (AQ_BASE_LO/HI, AQ_CAPS, ACQ_BASE,

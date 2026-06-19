@@ -5,7 +5,7 @@ what DMA/MMIO the driver performs to post Rx buffers, what the device must
 write into RX completion descriptors, and how the driver consumes them.
 
 Reference driver: AWS DPDK PMD (`userspace/dpdk/ena`), cross-checked against
-`ena_com`/`ena_eth_com`. Paths below are relative to `~/ena/amzn-drivers/`.
+`ena_com`/`ena_eth_com`. Paths below are relative to `amzn-drivers/`.
 
 Descriptor and CDESC byte layouts (bitfields, struct offsets) live in
 [rx-descriptors.md](./rx-descriptors.md) — not duplicated here.

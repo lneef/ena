@@ -7,7 +7,7 @@ carry, (b) what the CREATE_SQ response offsets mean, and (c) the byte-level
 contract for a pushed LLQ entry that the device must parse.
 
 Reference: AWS common ena_com (`kernel/linux/common/ena_com`) plus the DPDK
-PMD (`userspace/dpdk/ena`). Paths below are relative to `~/ena/amzn-drivers/`.
+PMD (`userspace/dpdk/ena`). Paths below are relative to `amzn-drivers/`.
 The common ena_com sources are mirrored verbatim under
 `userspace/dpdk/ena/base/`; line numbers cited here are from the
 `kernel/linux/common/ena_com` copy unless a path says otherwise.

@@ -51,6 +51,7 @@ def main() -> None:
         deny("refs-guard hook could not parse tool input; blocking as a precaution.")
         return
 
+    print(data)
     tool = data.get("tool_name", "") or ""
     agent = data.get("agent_type") or "main"
     tool_input = data.get("tool_input") or {}
@@ -74,16 +75,14 @@ def main() -> None:
             fp = tool_input.get("file_path", "") or ""
             if WIKI_MARKER not in fp:
                 deny(
-                        str(tool_input)
-                    
+                        "you may only write or edit in docs/wiki"
                         )
         if tool == "Bash":
             cmd = tool_input.get("command", "") or ""
             if BASH_WRITE_RE.search(cmd) and WIKI_MARKER not in cmd:
                 deny(
-                        str(tool_input)
-                    #"inspector may only write under docs/wiki/. "
-                    #"Use Read/Grep for research; record findings in the wiki."
+                    "inspector may only write under docs/wiki/. "
+                    "Use Read/Grep for research; record findings in the wiki."
                 )
         sys.exit(0)
 
