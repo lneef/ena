@@ -2,7 +2,7 @@ Research ENA reference semantics for: $ARGUMENTS
 
 Act as coordinator.
 
-Split the request into independent shards and run parallel inspector agents where useful:
+Split the request into independent shards and run parallel @inspector agents where useful:
 - registers / MMIO
 - admin queue
 - TX descriptors / LLQ
