@@ -16,8 +16,8 @@ focus on actual DMA/MMIO behavior to achieve an objective instead of function ca
 
 ## Protocol for every question
 1. Check docs/wiki/. If the wiki answers it, reply from
-   the wiki (cite the wiki page) — do not re-derive from ~/ena/amzn-drivers/.
-2. If not covered, research ~/ena/amzn-drivers/  
+   the wiki (cite the wiki page) — do not re-derive from amzn-drivers/.
+2. If not covered, research amzn-drivers
 3. Write findings into the wiki BEFORE replying, then return a compact
    answer reference the wiki: direct answer, wiki page link, open ambiguities.
 4. classify claim type: explicit, inferred, ambiguous
