@@ -23,7 +23,7 @@ import sys
 INSPECTOR = "inspector"
 VERIFIER = "wiki_verifier"
 SPEC_VERIFIER = "spec-verifier"
-REFS_MARKER = "amzn-drivers/"
+REFS_MARKER = "amzn-drivers"
 WIKI_MARKER = "docs/wiki"
 
 # Bash constructs that can write files
@@ -74,10 +74,9 @@ def main() -> None:
             fp = tool_input.get("file_path", "") or ""
             if WIKI_MARKER not in fp:
                 deny(
-                    "inspector may only write under docs/wiki/. "
-                    "Record research findings in the wiki; never modify "
-                    "code or other docs."
-                )
+                        str(tool_input)
+                    
+                        )
         if tool == "Bash":
             cmd = tool_input.get("command", "") or ""
             if BASH_WRITE_RE.search(cmd) and WIKI_MARKER not in cmd:
