@@ -1,6 +1,6 @@
 # ENA reference directory
 This directory holds the ENA-driver reference implementations for DPDK, FreeBSD and Linux.
-For us only DPDK is relevant.
+For mainly Linux and DPDK are relevant with DPDK providing a more concise surface of what should be supported.
 
 ## Structure
 ```

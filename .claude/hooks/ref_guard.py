@@ -50,8 +50,6 @@ def main() -> None:
         # Unparseable input: fail closed rather than open.
         deny("refs-guard hook could not parse tool input; blocking as a precaution.")
         return
-    with open("/tmp/dump.json", "w+") as f:
-        json.dump(data, f, indent=2)
     tool = data.get("tool_name", "") or ""
     agent = data.get("agent_type") or "main"
     tool_input = data.get("tool_input") or {}

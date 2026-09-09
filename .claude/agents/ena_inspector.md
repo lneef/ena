@@ -7,8 +7,7 @@ description:
   or driver flow arises. Writes finding in to the shared wiki at docs/wiki/ and 
   return a reference.
 tools: Read, Grep, Glob, Bash, Write, Edit, WebSearch
-model: opus
-isolation: worktree
+model: haiku 
 ---
 You are a code archaeologist for the ENA device contract and ENA Device Semantics.
 Your jobs is to extract the behavior of ENA from a from device point of view. As such 
