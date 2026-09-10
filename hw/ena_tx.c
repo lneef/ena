@@ -195,9 +195,12 @@ static void ena_tx_xmit(EnaState *s, const EnaSq *sq, const EnaTxPkt *p)
     size_t total = 0;
     unsigned i;
 
-    if (!sq->llq) {
-        hdr_len = 0;
-    } else if (hdr_len > sq->entry_size - ENA_LLQ_HEADER_OFF) {
+    if (!sq->llq && hdr_len) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ena: tx header_length %u with host placement\n", hdr_len);
+        return;
+    }
+    if (hdr_len > sq->entry_size - ENA_LLQ_HEADER_OFF) {
         qemu_log_mask(LOG_GUEST_ERROR, "ena: tx pushed header of %u bytes\n",
                       hdr_len);
         return;
@@ -208,6 +211,14 @@ static void ena_tx_xmit(EnaState *s, const EnaSq *sq, const EnaTxPkt *p)
     }
     if (total == 0 || total > ENA_TX_MAX_PKT) {
         qemu_log_mask(LOG_GUEST_ERROR, "ena: tx packet of %zu bytes\n", total);
+        return;
+    }
+    if ((meta_ctrl & ENA_ETH_IO_TX_DESC_TSO_EN_MASK) &&
+        (sq->meta.mss == 0 ||
+         ((meta_ctrl & ENA_ETH_IO_TX_DESC_L4_PROTO_IDX_MASK) >>
+          ENA_ETH_IO_TX_DESC_L4_PROTO_IDX_SHIFT) != ENA_ETH_IO_L4_PROTO_TCP)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: tso with mss %u meta_ctrl 0x%x\n",
+                      sq->meta.mss, meta_ctrl);
         return;
     }
 
@@ -262,12 +273,6 @@ void ena_tx_doorbell(EnaState *s, EnaSq *sq)
     if (!s->cq[sq->cq_idx].used) {
         return;
     }
-    if ((uint16_t)(sq->tail - sq->head) >= sq->depth) {
-        qemu_log_mask(LOG_GUEST_ERROR, "ena: tx doorbell %u past depth %u\n",
-                      sq->tail, sq->depth);
-        return;
-    }
-
     while (sq->head != sq->tail) {
         EnaTxPkt p;
         uint32_t len_ctrl, meta_ctrl;

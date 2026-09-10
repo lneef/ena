@@ -331,6 +331,50 @@ static void test_source_mac_filter(void *obj, void *data,
     g_assert_cmpuint(le16_to_cpu(c.req_id), ==, 3);
 }
 
+/* Descriptor uses outside the driver contract are completed but not sent. */
+static void test_unsupported_flags(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    EnaTxQueue q;
+    struct ena_eth_io_tx_desc dsc;
+    struct ena_eth_io_tx_cdesc c;
+    uint8_t frame[128];
+    uint8_t rx[128];
+    size_t len = ena_build_eth(frame, 64);
+    uint64_t buf = guest_alloc(alloc, len);
+    int fd = ena_backend_fd(data);
+
+    ena_bringup(d);
+    ena_txq_create(d, &q, 1024, 2, NO_VECTOR, false);
+    qtest_memwrite(d->dev.bus->qts, buf, frame, len);
+
+    /* header_length is an LLQ field */
+    ena_tx_desc_fill(&dsc, buf, len, 1, SINGLE, 0, 14);
+    ena_txq_push(d, &q, &dsc);
+    ena_txq_doorbell(d, &q);
+    g_assert_cmpint(ena_backend_recv(fd, rx, sizeof(rx)), ==, -1);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &c));
+    g_assert_cmpuint(le16_to_cpu(c.req_id), ==, 1);
+
+    /* TSO needs a TCP packet and a meta descriptor with a non-zero MSS */
+    ena_tx_desc_fill(&dsc, buf, len, 2, SINGLE,
+                     ENA_ETH_IO_TX_DESC_TSO_EN_MASK |
+                     (ENA_ETH_IO_L4_PROTO_TCP <<
+                      ENA_ETH_IO_TX_DESC_L4_PROTO_IDX_SHIFT), 0);
+    ena_txq_push(d, &q, &dsc);
+    ena_txq_doorbell(d, &q);
+    g_assert_cmpint(ena_backend_recv(fd, rx, sizeof(rx)), ==, -1);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &c));
+    g_assert_cmpuint(le16_to_cpu(c.req_id), ==, 2);
+
+    /* the queue keeps working */
+    send_single(d, &q, buf, len, 3);
+    expect_frame(fd, frame, len);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &c));
+    g_assert_cmpuint(le16_to_cpu(c.req_id), ==, 3);
+}
+
 static void register_ena_txpath_test(void)
 {
     QOSGraphTestOptions opts = {
@@ -339,6 +383,8 @@ static void register_ena_txpath_test(void)
 
     qos_add_test("txpath/single-frame", "ena", test_single_frame, &opts);
     qos_add_test("txpath/source-mac-filter", "ena", test_source_mac_filter,
+                 &opts);
+    qos_add_test("txpath/unsupported-flags", "ena", test_unsupported_flags,
                  &opts);
     qos_add_test("txpath/multi-desc", "ena", test_multi_desc, &opts);
     qos_add_test("txpath/meta-and-no-completion", "ena",

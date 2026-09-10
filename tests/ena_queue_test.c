@@ -76,6 +76,13 @@ static void test_cq_bad_params(void *obj, void *data, QGuestAllocator *alloc)
                     ENA_ADMIN_ILLEGAL_PARAMETER);
     g_assert_cmpint(ena_create_cq(d, 1024, 1, 1, ring, &cq), ==,
                     ENA_ADMIN_ILLEGAL_PARAMETER);
+    /* IO vectors are 1..8 or none (-1); vector 0 belongs to the admin path */
+    g_assert_cmpint(ena_create_cq(d, 1024, 4, 0, ring, &cq), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
+    g_assert_cmpint(ena_create_cq(d, 1024, 4, 9, ring, &cq), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
+    g_assert_cmpint(ena_create_cq(d, 1024, 4, 0xffffffff, ring, &cq), ==,
+                    ENA_ADMIN_SUCCESS);
 }
 
 static void test_create_destroy_sq(void *obj, void *data, QGuestAllocator *alloc)
@@ -152,6 +159,15 @@ static void test_sq_bad_params(void *obj, void *data, QGuestAllocator *alloc)
                      ENA_ADMIN_AQ_CREATE_SQ_CMD_COMPLETION_POLICY_SHIFT);
     g_assert_cmpint(ena_admin_cmd(d, &cmd, sizeof(cmd), &sq, sizeof(sq)), ==,
                     ENA_ADMIN_UNSUPPORTED_OPCODE);
+
+    /* the ring must be physically contiguous */
+    cmd.sq_caps_2 = ENA_ADMIN_PLACEMENT_POLICY_HOST |
+                    (ENA_ADMIN_COMPLETION_POLICY_DESC <<
+                     ENA_ADMIN_AQ_CREATE_SQ_CMD_COMPLETION_POLICY_SHIFT);
+    cmd.sq_caps_3 = 0;
+    cmd.sq_ba.mem_addr_low = cpu_to_le32(ring);
+    g_assert_cmpint(ena_admin_cmd(d, &cmd, sizeof(cmd), &sq, sizeof(sq)), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
 }
 
 static void test_llq_sq(void *obj, void *data, QGuestAllocator *alloc)

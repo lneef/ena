@@ -157,11 +157,12 @@ static uint64_t ena_rx_desc_addr(const struct ena_eth_io_rx_desc *d)
 static bool ena_rx_desc_valid(const EnaSq *sq,
                               const struct ena_eth_io_rx_desc *d)
 {
-    uint8_t both = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_LAST_MASK;
+    uint8_t need = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_LAST_MASK |
+                   ENA_ETH_IO_RX_DESC_COMP_REQ_MASK;
 
-    if ((d->ctrl & both) != both) {
+    if ((d->ctrl & need) != need) {
         qemu_log_mask(LOG_GUEST_ERROR,
-                      "ena: RX descriptor ctrl 0x%x lacks first|last\n",
+                      "ena: RX descriptor ctrl 0x%x lacks first|last|comp_req\n",
                       d->ctrl);
         return false;
     }

@@ -9,6 +9,7 @@
 #include "hw/pci/pci_device.h"
 #include "net/net.h"
 #include "qemu/timer.h"
+#include "qemu/log.h"
 #include "qom/object.h"
 #include "hw/ena_defs/ena_defs.h"
 
@@ -24,6 +25,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(EnaState, ENA)
 #define ENA_MAX_CQ                  (2 * ENA_MAX_IO_QUEUES)
 #define ENA_MSIX_VECTORS            (1 + ENA_MAX_IO_QUEUES)
 #define ENA_ADMIN_MSIX_VECTOR       0
+#define ENA_MSIX_VECTOR_NONE        0xffffffff
 #define ENA_MAX_QUEUE_DEPTH         1024
 #define ENA_MAX_CQ_ENTRY_SIZE       32
 #define ENA_MIN_QUEUE_DEPTH         16
@@ -65,6 +67,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(EnaState, ENA)
 #define ENA_CTRL_VERSION_IMPL_ID    1
 #define ENA_CAPS_RESET_TIMEOUT      10   /* units of 100 ms */
 #define ENA_CAPS_ADMIN_CMD_TO       0    /* 0: driver default */
+
+/* Guest action outside the emulated driver contract. */
+#define ena_unsupported(fmt, ...) \
+    do { \
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: unsupported: " fmt "\n", \
+                      ##__VA_ARGS__); \
+        abort(); \
+    } while (0)
 
 typedef struct EnaCq {
     bool used;
@@ -113,7 +123,6 @@ typedef struct EnaRss {
     uint32_t key[ENA_ADMIN_RSS_KEY_PARTS];
     uint32_t key_parts;
     uint32_t init_val;
-    uint16_t input_sort;
     uint16_t fields[ENA_ADMIN_RSS_PROTO_NUM];
     uint16_t ind_tbl[ENA_RSS_IND_TBL_SIZE];
 } EnaRss;

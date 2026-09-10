@@ -49,7 +49,6 @@
     (ENA_ADMIN_RSS_L3_DA | ENA_ADMIN_RSS_L3_SA | \
      ENA_ADMIN_RSS_L4_DP | ENA_ADMIN_RSS_L4_SP)
 #define ENA_RSS_L3_FIELDS (ENA_ADMIN_RSS_L3_DA | ENA_ADMIN_RSS_L3_SA)
-#define ENA_RSS_L2_FIELDS (ENA_ADMIN_RSS_L2_DA | ENA_ADMIN_RSS_L2_SA)
 
 static bool ena_valid_depth(uint32_t depth)
 {
@@ -64,10 +63,17 @@ static int ena_create_cq(EnaState *s, const struct ena_admin_aq_entry *cmd,
     struct ena_admin_acq_create_cq_resp_desc *r = (void *)resp;
     uint16_t depth = le16_to_cpu(c->cq_depth);
     uint8_t words = c->cq_caps_2 & ENA_ADMIN_AQ_CREATE_CQ_CMD_CQ_ENTRY_SIZE_WORDS_MASK;
+    uint32_t vector = le32_to_cpu(c->msix_vector);
     EnaCq *cq;
     int i;
 
     if (!ena_valid_depth(depth) || (words != 2 && words != 4 && words != 8)) {
+        return ENA_ADMIN_ILLEGAL_PARAMETER;
+    }
+    /* IO vectors are 1..8; -1 means no interrupt */
+    if ((c->cq_caps_1 & ENA_ADMIN_AQ_CREATE_CQ_CMD_INTERRUPT_MODE_ENABLED_MASK) &&
+        vector != ENA_MSIX_VECTOR_NONE &&
+        (vector == ENA_ADMIN_MSIX_VECTOR || vector >= ENA_MSIX_VECTORS)) {
         return ENA_ADMIN_ILLEGAL_PARAMETER;
     }
     for (i = 0; i < ENA_MAX_CQ && s->cq[i].used; i++) {
@@ -83,7 +89,7 @@ static int ena_create_cq(EnaState *s, const struct ena_admin_aq_entry *cmd,
     cq->entry_size = words * 4;
     cq->intr_enabled = !!(c->cq_caps_1 &
                           ENA_ADMIN_AQ_CREATE_CQ_CMD_INTERRUPT_MODE_ENABLED_MASK);
-    cq->msix_vector = le32_to_cpu(c->msix_vector);
+    cq->msix_vector = vector;
     cq->tail = 0;
     cq->phase = true;
 
@@ -138,6 +144,9 @@ static int ena_create_sq(EnaState *s, const struct ena_admin_aq_entry *cmd,
     if (completion != ENA_ADMIN_COMPLETION_POLICY_DESC) {
         return ENA_ADMIN_UNSUPPORTED_OPCODE;
     }
+    if (!(c->sq_caps_3 & ENA_ADMIN_AQ_CREATE_SQ_CMD_IS_PHYSICALLY_CONTIGUOUS_MASK)) {
+        return ENA_ADMIN_ILLEGAL_PARAMETER;
+    }
     if (cq_idx >= ENA_MAX_CQ || !s->cq[cq_idx].used || !ena_valid_depth(depth)) {
         return ENA_ADMIN_ILLEGAL_PARAMETER;
     }
@@ -185,13 +194,37 @@ static int ena_destroy_sq(EnaState *s, const struct ena_admin_aq_entry *cmd,
 }
 
 /* Control buffer: the driver hands a direct pointer to the data. */
-static uint64_t ena_ctrl_buf(const struct ena_admin_ctrl_buff_info *info,
+static uint64_t ena_ctrl_buf(uint8_t flags,
+                             const struct ena_admin_ctrl_buff_info *info,
                              size_t need)
 {
     if (le32_to_cpu(info->length) < need) {
         return 0;
     }
+    if (!(flags & ENA_ADMIN_AQ_COMMON_DESC_CTRL_DATA_INDIRECT_MASK)) {
+        ena_unsupported("inline admin control data");
+    }
     return ena_mem_addr(&info->address);
+}
+
+/* Non-IP frames are not hashed. */
+static uint16_t ena_rss_supported_fields(int proto)
+{
+    switch (proto) {
+    case ENA_ADMIN_RSS_TCP4:
+    case ENA_ADMIN_RSS_UDP4:
+    case ENA_ADMIN_RSS_TCP6:
+    case ENA_ADMIN_RSS_UDP6:
+    case ENA_ADMIN_RSS_TCP6_EX:
+        return ENA_RSS_L3L4_FIELDS;
+    case ENA_ADMIN_RSS_IP4:
+    case ENA_ADMIN_RSS_IP6:
+    case ENA_ADMIN_RSS_IP4_FRAG:
+    case ENA_ADMIN_RSS_IP6_EX:
+        return ENA_RSS_L3_FIELDS;
+    default:
+        return 0;
+    }
 }
 
 static void ena_fill_hash_ctrl(EnaState *s,
@@ -201,29 +234,7 @@ static void ena_fill_hash_ctrl(EnaState *s,
 
     memset(hc, 0, sizeof(*hc));
     for (i = 0; i < ENA_ADMIN_RSS_PROTO_NUM; i++) {
-        uint16_t sup;
-
-        switch (i) {
-        case ENA_ADMIN_RSS_TCP4:
-        case ENA_ADMIN_RSS_UDP4:
-        case ENA_ADMIN_RSS_TCP6:
-        case ENA_ADMIN_RSS_UDP6:
-        case ENA_ADMIN_RSS_TCP6_EX:
-            sup = ENA_RSS_L3L4_FIELDS;
-            break;
-        case ENA_ADMIN_RSS_IP4:
-        case ENA_ADMIN_RSS_IP6:
-        case ENA_ADMIN_RSS_IP4_FRAG:
-        case ENA_ADMIN_RSS_IP6_EX:
-            sup = ENA_RSS_L3_FIELDS;
-            break;
-        case ENA_ADMIN_RSS_NOT_IP:
-            sup = ENA_RSS_L2_FIELDS;
-            break;
-        default:
-            sup = 0;
-        }
-        hc->supported_fields[i].fields = cpu_to_le16(sup);
+        hc->supported_fields[i].fields = cpu_to_le16(ena_rss_supported_fields(i));
         hc->selected_fields[i].fields = cpu_to_le16(s->rss.fields[i]);
     }
 }
@@ -344,7 +355,7 @@ static int ena_get_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         r->u.flow_hash_func.supported_func = cpu_to_le32(BIT(ENA_ADMIN_TOEPLITZ));
         r->u.flow_hash_func.selected_func = cpu_to_le32(BIT(ENA_ADMIN_TOEPLITZ));
         r->u.flow_hash_func.init_val = cpu_to_le32(s->rss.init_val);
-        buf = ena_ctrl_buf(&c->control_buffer, sizeof(key));
+        buf = ena_ctrl_buf(c->aq_common_descriptor.flags, &c->control_buffer, sizeof(key));
         if (buf) {
             memset(&key, 0, sizeof(key));
             key.key_parts = cpu_to_le32(s->rss.key_parts);
@@ -360,8 +371,8 @@ static int ena_get_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         struct ena_admin_feature_rss_hash_control hc;
 
         r->u.flow_hash_input.supported_input_sort = 0;
-        r->u.flow_hash_input.enabled_input_sort = cpu_to_le16(s->rss.input_sort);
-        buf = ena_ctrl_buf(&c->control_buffer, sizeof(hc));
+        r->u.flow_hash_input.enabled_input_sort = 0;
+        buf = ena_ctrl_buf(c->aq_common_descriptor.flags, &c->control_buffer, sizeof(hc));
         if (buf) {
             ena_fill_hash_ctrl(s, &hc);
             ena_dma_write(s, buf, &hc, sizeof(hc));
@@ -377,7 +388,7 @@ static int ena_get_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         r->u.ind_table.size = cpu_to_le16(ENA_RSS_IND_TBL_LOG_SIZE);
         r->u.ind_table.flags = 0;
         r->u.ind_table.inline_index = cpu_to_le32(0xffffffff);
-        buf = ena_ctrl_buf(&c->control_buffer, sizeof(tbl));
+        buf = ena_ctrl_buf(c->aq_common_descriptor.flags, &c->control_buffer, sizeof(tbl));
         if (buf) {
             memset(tbl, 0, sizeof(tbl));
             for (i = 0; i < ENA_RSS_IND_TBL_SIZE; i++) {
@@ -459,10 +470,10 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         if (func != BIT(ENA_ADMIN_TOEPLITZ)) {
             return ENA_ADMIN_ILLEGAL_PARAMETER;
         }
-        buf = ena_ctrl_buf(&c->control_buffer, sizeof(key));
+        buf = ena_ctrl_buf(c->aq_common_descriptor.flags, &c->control_buffer, sizeof(key));
         if (buf) {
             ena_dma_read(s, buf, &key, sizeof(key));
-            if (le32_to_cpu(key.key_parts) > ENA_ADMIN_RSS_KEY_PARTS) {
+            if (le32_to_cpu(key.key_parts) != ENA_ADMIN_RSS_KEY_PARTS) {
                 return ENA_ADMIN_ILLEGAL_PARAMETER;
             }
             s->rss.key_parts = le32_to_cpu(key.key_parts);
@@ -477,14 +488,25 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
     case ENA_ADMIN_RSS_HASH_INPUT: {
         struct ena_admin_feature_rss_hash_control hc;
 
-        buf = ena_ctrl_buf(&c->control_buffer, sizeof(hc));
+        /*
+         * The driver selects unsupported bits (L2, sorting) unconditionally;
+         * they are masked. Address-only or port-only selections are rejected.
+         */
+        buf = ena_ctrl_buf(c->aq_common_descriptor.flags, &c->control_buffer, sizeof(hc));
         if (buf) {
+            uint16_t sel[ENA_ADMIN_RSS_PROTO_NUM];
+
             ena_dma_read(s, buf, &hc, sizeof(hc));
             for (i = 0; i < ENA_ADMIN_RSS_PROTO_NUM; i++) {
-                s->rss.fields[i] = le16_to_cpu(hc.selected_fields[i].fields);
+                sel[i] = le16_to_cpu(hc.selected_fields[i].fields) &
+                         ena_rss_supported_fields(i);
+                if (sel[i] != 0 && sel[i] != ENA_RSS_L3_FIELDS &&
+                    sel[i] != ENA_RSS_L3L4_FIELDS) {
+                    return ENA_ADMIN_ILLEGAL_PARAMETER;
+                }
             }
+            memcpy(s->rss.fields, sel, sizeof(sel));
         }
-        s->rss.input_sort = le16_to_cpu(c->u.flow_hash_input.enabled_input_sort);
         return ENA_ADMIN_SUCCESS;
     }
 
@@ -494,7 +516,7 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         if (le16_to_cpu(c->u.ind_table.size) != ENA_RSS_IND_TBL_LOG_SIZE) {
             return ENA_ADMIN_ILLEGAL_PARAMETER;
         }
-        buf = ena_ctrl_buf(&c->control_buffer, sizeof(tbl));
+        buf = ena_ctrl_buf(c->aq_common_descriptor.flags, &c->control_buffer, sizeof(tbl));
         if (!buf) {
             return ENA_ADMIN_ILLEGAL_PARAMETER;
         }

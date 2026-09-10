@@ -237,6 +237,11 @@ static void test_rss_features(void *obj, void *data, QGuestAllocator *alloc)
     for (i = 0; i < ENA_ADMIN_RSS_KEY_PARTS; i++) {
         g_assert_cmphex(le32_to_cpu(key.key[i]), ==, 0x01010101 * (i + 1));
     }
+    /* only a full 40-byte key is accepted */
+    key.key_parts = cpu_to_le32(5);
+    qtest_memwrite(d->dev.bus->qts, buf, &key, sizeof(key));
+    g_assert_cmpint(ena_set_feature(d, &cmd, buf, sizeof(key)), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
 
     /* hash input */
     g_assert_cmpint(ena_get_feature(d, ENA_ADMIN_RSS_HASH_INPUT, 0, buf,
@@ -261,11 +266,42 @@ static void test_rss_features(void *obj, void *data, QGuestAllocator *alloc)
     qtest_memset(d->dev.bus->qts, buf, 0, sizeof(hc));
     g_assert_cmpint(ena_get_feature(d, ENA_ADMIN_RSS_HASH_INPUT, 0, buf,
                                     sizeof(hc), &resp), ==, ENA_ADMIN_SUCCESS);
-    g_assert_cmphex(le16_to_cpu(resp.u.flow_hash_input.enabled_input_sort), ==,
-                    ENA_ADMIN_FEATURE_RSS_FLOW_HASH_INPUT_L3_SORT_MASK);
+    /* sorting is not supported: the request is accepted, nothing is enabled */
+    g_assert_cmphex(le16_to_cpu(resp.u.flow_hash_input.supported_input_sort),
+                    ==, 0);
+    g_assert_cmphex(le16_to_cpu(resp.u.flow_hash_input.enabled_input_sort),
+                    ==, 0);
     qtest_memread(d->dev.bus->qts, buf, &hc, sizeof(hc));
     g_assert_cmphex(le16_to_cpu(hc.selected_fields[ENA_ADMIN_RSS_UDP4].fields),
                     ==, ENA_ADMIN_RSS_L3_DA | ENA_ADMIN_RSS_L3_SA);
+
+    /* source-only or destination-only selections are rejected */
+    hc.selected_fields[ENA_ADMIN_RSS_UDP4].fields =
+        cpu_to_le16(ENA_ADMIN_RSS_L3_SA | ENA_ADMIN_RSS_L4_SP | ENA_ADMIN_RSS_L4_DP);
+    qtest_memwrite(d->dev.bus->qts, buf, &hc, sizeof(hc));
+    g_assert_cmpint(ena_set_feature(d, &cmd, buf, sizeof(hc)), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
+
+    /* non-IP frames are not hashed; unsupported bits are masked, not stored */
+    g_assert_cmphex(le16_to_cpu(hc.supported_fields[ENA_ADMIN_RSS_NOT_IP].fields),
+                    ==, 0);
+    hc.selected_fields[ENA_ADMIN_RSS_UDP4].fields =
+        cpu_to_le16(ENA_ADMIN_RSS_L2_DA | ENA_ADMIN_RSS_L2_SA |
+                    ENA_ADMIN_RSS_L3_DA | ENA_ADMIN_RSS_L3_SA |
+                    ENA_ADMIN_RSS_L4_DP | ENA_ADMIN_RSS_L4_SP);
+    hc.selected_fields[ENA_ADMIN_RSS_NOT_IP].fields =
+        cpu_to_le16(ENA_ADMIN_RSS_L2_DA | ENA_ADMIN_RSS_L2_SA);
+    qtest_memwrite(d->dev.bus->qts, buf, &hc, sizeof(hc));
+    g_assert_cmpint(ena_set_feature(d, &cmd, buf, sizeof(hc)), ==, ENA_ADMIN_SUCCESS);
+    qtest_memset(d->dev.bus->qts, buf, 0, sizeof(hc));
+    g_assert_cmpint(ena_get_feature(d, ENA_ADMIN_RSS_HASH_INPUT, 0, buf,
+                                    sizeof(hc), &resp), ==, ENA_ADMIN_SUCCESS);
+    qtest_memread(d->dev.bus->qts, buf, &hc, sizeof(hc));
+    g_assert_cmphex(le16_to_cpu(hc.selected_fields[ENA_ADMIN_RSS_UDP4].fields),
+                    ==, ENA_ADMIN_RSS_L3_DA | ENA_ADMIN_RSS_L3_SA |
+                    ENA_ADMIN_RSS_L4_DP | ENA_ADMIN_RSS_L4_SP);
+    g_assert_cmphex(le16_to_cpu(hc.selected_fields[ENA_ADMIN_RSS_NOT_IP].fields),
+                    ==, 0);
 
     /* indirection table */
     g_assert_cmpint(ena_get_feature(d, ENA_ADMIN_RSS_INDIRECTION_TABLE_CONFIG,

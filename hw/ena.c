@@ -335,6 +335,11 @@ static void ena_mmio_readless(EnaState *s, uint32_t req)
 
 static void ena_dev_ctl_write(EnaState *s, uint32_t val)
 {
+    if (val & ~(ENA_REGS_DEV_CTL_DEV_RESET_MASK |
+                ENA_REGS_DEV_CTL_RESET_REASON_MASK |
+                ENA_REGS_DEV_CTL_RESET_REASON_EXT_MASK)) {
+        ena_unsupported("DEV_CTL write 0x%x", val);
+    }
     if (val & ENA_REGS_DEV_CTL_DEV_RESET_MASK) {
         ena_dev_reset(s);
         REG(s, ENA_REGS_DEV_CTL_OFF) = val;
@@ -365,6 +370,11 @@ static void ena_reg_write(void *opaque, hwaddr addr, uint64_t val64,
         if (!sq->used) {
             return;
         }
+        if ((uint16_t)(val - sq->head) > sq->depth) {
+            qemu_log_mask(LOG_GUEST_ERROR, "ena: sq doorbell %u past depth %u\n",
+                          val, sq->depth);
+            return;
+        }
         sq->tail = val;
         if (sq->is_tx) {
             ena_tx_doorbell(s, sq);
@@ -379,7 +389,7 @@ static void ena_reg_write(void *opaque, hwaddr addr, uint64_t val64,
         return;
     }
     if (addr >= ENA_REG_FILE_SIZE) {
-        return;
+        ena_unsupported("write to BAR0 offset 0x%" HWADDR_PRIx, addr);
     }
 
     switch (addr) {
@@ -418,9 +428,20 @@ static void ena_reg_write(void *opaque, hwaddr addr, uint64_t val64,
         s->aenq_phase = true;
         REG(s, ENA_REGS_AENQ_TAIL_OFF) = 0;
         break;
-    default:
+    case ENA_REGS_MMIO_RESP_LO_OFF:
+    case ENA_REGS_MMIO_RESP_HI_OFF:
+    case ENA_REGS_AQ_BASE_LO_OFF:
+    case ENA_REGS_AQ_BASE_HI_OFF:
+    case ENA_REGS_ACQ_BASE_LO_OFF:
+    case ENA_REGS_ACQ_BASE_HI_OFF:
+    case ENA_REGS_AENQ_BASE_LO_OFF:
+    case ENA_REGS_AENQ_BASE_HI_OFF:
+    case ENA_REGS_AENQ_HEAD_DB_OFF:
+    case ENA_REGS_INTR_MASK_OFF:
         REG(s, addr) = val;
         break;
+    default:
+        ena_unsupported("write to register 0x%" HWADDR_PRIx, addr);
     }
 }
 

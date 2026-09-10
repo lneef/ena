@@ -1069,8 +1069,16 @@ static void test_rx_bad_desc(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_false(rx_cq_next(&r, &c));
 
     /* descriptor without first|last */
-    desc.ctrl = ENA_ETH_IO_RX_DESC_FIRST_MASK;
+    desc.ctrl = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_COMP_REQ_MASK;
     desc.req_id = 0;
+    qtest_memwrite(rx_qts(&r), r.sq_base, &desc, sizeof(desc));
+    ena_reg_write(d, SQ_DB_BASE + r.sq_idx * 4, r.tail);
+    ena_backend_send(r.fd, frame, len);
+    rx_settle(&r);
+    g_assert_false(rx_cq_next(&r, &c));
+
+    /* descriptor without a completion request */
+    desc.ctrl = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_LAST_MASK;
     qtest_memwrite(rx_qts(&r), r.sq_base, &desc, sizeof(desc));
     ena_reg_write(d, SQ_DB_BASE + r.sq_idx * 4, r.tail);
     ena_backend_send(r.fd, frame, len);
@@ -1080,10 +1088,17 @@ static void test_rx_bad_desc(void *obj, void *data, QGuestAllocator *alloc)
     rx_get_stats(d, &pkts, &bytes, &drops);
     g_assert_cmpuint(pkts, ==, 0);
     g_assert_cmpuint(bytes, ==, 0);
-    g_assert_cmpuint(drops, ==, 2);
+    g_assert_cmpuint(drops, ==, 3);
+
+    /* a doorbell more than depth ahead of the head is ignored */
+    ena_reg_write(d, SQ_DB_BASE + r.sq_idx * 4, r.tail + 17);
+    ena_backend_send(r.fd, frame, len);
+    rx_settle(&r);
+    g_assert_false(rx_cq_next(&r, &c));
 
     /* a well formed descriptor is still accepted afterwards */
-    desc.ctrl = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_LAST_MASK;
+    desc.ctrl = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_LAST_MASK |
+                ENA_ETH_IO_RX_DESC_COMP_REQ_MASK;
     qtest_memwrite(rx_qts(&r), r.sq_base, &desc, sizeof(desc));
     ena_reg_write(d, SQ_DB_BASE + r.sq_idx * 4, r.tail);
     ena_backend_send(r.fd, frame, len);
