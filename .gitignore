@@ -1,1 +1,6 @@
 .claude/worktrees
+.claude/
+.codex/
+docs/
+wiki
+nix-make.sh

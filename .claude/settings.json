@@ -2,19 +2,12 @@
   "worktree": {
     "baseRef": "head"
   }, 
-  "permissions": {
-    "defaultMode": "acceptEdits"
-  },
   "sandbox": {
-    "enabled": true,
-    "failIfUnavailable": false,
-    "autoAllowBashIfSandboxed": true,
-    "filesystem": {  
-      "allowWrite": ["/tmp", "/home/lukas/miniosv/"],
+      "filesystem": {  
       "denyRead": ["~/.aws", "~/.ssh", "~/.claude.json"]
-    },
-    "network": {
-      "allowedDomains": ["github.com"]
     }
+  },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   }
 }
