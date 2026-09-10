@@ -112,7 +112,6 @@ typedef struct EnaSq {
 typedef struct EnaRss {
     uint32_t key[ENA_ADMIN_RSS_KEY_PARTS];
     uint32_t key_parts;
-    uint8_t func;
     uint32_t init_val;
     uint16_t input_sort;
     uint16_t fields[ENA_ADMIN_RSS_PROTO_NUM];

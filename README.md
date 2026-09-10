@@ -128,7 +128,8 @@ PMD:
 - HW hints (driver timeouts) and the AENQ notification, warning, fatal-error and
   configuration-notification groups
 - fragment bypass and HW RX timestamping
-- RSS: CRC32 hash function, symmetric hashing (`input_sort`), per-field
-  source-only/destination-only selection
+- RSS: symmetric hashing (`input_sort`), per-field source-only/destination-only
+  selection. The hash function is fixed to Toeplitz by design; selecting CRC32
+  is rejected
 - LLQ TX burst limit (`LIMIT_TX_BURST` accelerated mode)
 - second device id `1d0f:ec21`, live migration

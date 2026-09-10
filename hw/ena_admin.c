@@ -342,7 +342,7 @@ static int ena_get_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         struct ena_admin_feature_rss_flow_hash_control key;
 
         r->u.flow_hash_func.supported_func = cpu_to_le32(BIT(ENA_ADMIN_TOEPLITZ));
-        r->u.flow_hash_func.selected_func = cpu_to_le32(BIT(s->rss.func));
+        r->u.flow_hash_func.selected_func = cpu_to_le32(BIT(ENA_ADMIN_TOEPLITZ));
         r->u.flow_hash_func.init_val = cpu_to_le32(s->rss.init_val);
         buf = ena_ctrl_buf(&c->control_buffer, sizeof(key));
         if (buf) {
@@ -455,6 +455,7 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         struct ena_admin_feature_rss_flow_hash_control key;
         uint32_t func = le32_to_cpu(c->u.flow_hash_func.selected_func);
 
+        /* The hash function is fixed to Toeplitz. */
         if (func != BIT(ENA_ADMIN_TOEPLITZ)) {
             return ENA_ADMIN_ILLEGAL_PARAMETER;
         }
@@ -469,7 +470,6 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
                 s->rss.key[i] = le32_to_cpu(key.key[i]);
             }
         }
-        s->rss.func = ENA_ADMIN_TOEPLITZ;
         s->rss.init_val = le32_to_cpu(c->u.flow_hash_func.init_val);
         return ENA_ADMIN_SUCCESS;
     }

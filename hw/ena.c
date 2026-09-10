@@ -237,7 +237,6 @@ static void ena_rss_reset(EnaRss *rss)
     memset(rss, 0, sizeof(*rss));
     memcpy(rss->key, default_key, sizeof(rss->key));
     rss->key_parts = ENA_ADMIN_RSS_KEY_PARTS;
-    rss->func = ENA_ADMIN_TOEPLITZ;
     for (i = 0; i < ENA_ADMIN_RSS_PROTO_NUM; i++) {
         switch (i) {
         case ENA_ADMIN_RSS_TCP4:
