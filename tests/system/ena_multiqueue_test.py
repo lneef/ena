@@ -153,6 +153,9 @@ def main():
     ap.add_argument("--dst-mac", default="52:54:00:00:00:02")
     ap.add_argument("--device-opts", default="",
                     help="extra -device ena options, e.g. ',llq-large-header=on'")
+    ap.add_argument("--rx-irq", action="store_true",
+                    help="expect an interrupt-driven guest (miniosv built with "
+                         "BENCH_RX_IRQ=1): every queue must report RX interrupts")
     ap.add_argument("--src-mac", default="52:54:00:00:00:01")
     ap.add_argument("--dip", default="10.0.0.2")
     ap.add_argument("--dport", type=int, default=1234)
@@ -228,21 +231,27 @@ def main():
             print("host kernel dropped %d datagrams on the UDP socket (RcvbufErrors); "
                   "raise --pace-us" % host_drops)
 
-        # the guest reports "queue i rx= tx=" every 2 s; take the last full set
+        # the guest reports "queue i rx= tx= irq=" every 2 s; take the last set
         time.sleep(3)
         with lock:
             reports = [l for l in lines if l.startswith("queue ")]
         last = {}
         for l in reports:
             parts = l.split()
-            last[int(parts[1])] = (int(parts[2][3:]), int(parts[3][3:]))
-        rx = [last.get(i, (0, 0))[0] for i in range(nrx)]
-        tx = [last.get(i, (0, 0))[1] for i in range(nrx)]
+            last[int(parts[1])] = [int(p.split("=")[1]) for p in parts[2:5]]
+        rx = [last.get(i, [0, 0, 0])[0] for i in range(nrx)]
+        tx = [last.get(i, [0, 0, 0])[1] for i in range(nrx)]
+        irq = [last.get(i, [0, 0, 0])[2] for i in range(nrx)]
         print("expected per queue:", expected)
         print("guest rx per queue: ", rx)
         print("guest tx per queue: ", tx)
+        print("guest irq per queue:", irq)
 
         ok = len(got) == want and not bad and rx == expected and tx == expected
+        if a.rx_irq and min(irq) == 0:
+            print("FAIL: a queue served no RX interrupt"); ok = False
+        if not a.rx_irq and max(irq) != 0:
+            print("FAIL: polling guest reported RX interrupts"); ok = False
         print("PASS" if ok else "FAIL")
         return 0 if ok else 1
     finally:

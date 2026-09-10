@@ -61,7 +61,14 @@ python3 .claude/skills/ena-system-test/inject.py --dst-mac 52:54:00:00:00:02 --c
 python3 tests/system/ena_multiqueue_test.py --vcpus 4 --flows 64
 # same with 256-byte LLQ entries (the device recommends them to the driver)
 python3 tests/system/ena_multiqueue_test.py --device-opts ,llq-large-header=on
+# interrupt-driven guest: build miniosv with `make BENCH_RX_IRQ=1`, then the pong
+# threads sleep on their RX queue MSI-X vector and the test checks every queue
+# served interrupts
+python3 tests/system/ena_multiqueue_test.py --rx-irq
 ```
+
+If the host drops datagrams before QEMU reads them (the test reports
+`RcvbufErrors`), slow the senders down with `--pace-us 20000`.
 
 Device properties: `llq-large-header=on|off` (default off) selects whether the
 device recommends 256-byte or 128-byte LLQ entries; both sizes are supported.
