@@ -152,6 +152,10 @@ static int ena_create_sq(EnaState *s, const struct ena_admin_aq_entry *cmd,
         return ENA_ADMIN_RESOURCE_ALLOCATION_FAILURE;
     }
 
+    if (llq && (uint32_t)depth * s->llq_entry_size > ENA_LLQ_QUEUE_BYTES) {
+        return ENA_ADMIN_ILLEGAL_PARAMETER;
+    }
+
     sq = &s->sq[i];
     memset(sq, 0, sizeof(*sq));
     sq->used = true;
@@ -160,6 +164,7 @@ static int ena_create_sq(EnaState *s, const struct ena_admin_aq_entry *cmd,
     sq->cq_idx = cq_idx;
     sq->base = llq ? 0 : ena_mem_addr(&c->sq_ba);
     sq->depth = depth;
+    sq->entry_size = llq ? s->llq_entry_size : 0;
 
     r->sq_idx = cpu_to_le16(i);
     r->sq_doorbell_offset = cpu_to_le32(ENA_REG_SQ_DB_BASE + i * 4);
@@ -288,9 +293,12 @@ static int ena_get_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         r->u.llq.header_location_ctrl_supported = cpu_to_le16(ENA_ADMIN_INLINE_HEADER);
         r->u.llq.header_location_ctrl_enabled =
             cpu_to_le16(s->llq_enabled ? ENA_ADMIN_INLINE_HEADER : 0);
-        r->u.llq.entry_size_ctrl_supported = cpu_to_le16(ENA_ADMIN_LIST_ENTRY_SIZE_128B);
+        r->u.llq.entry_size_ctrl_supported =
+            cpu_to_le16(ENA_ADMIN_LIST_ENTRY_SIZE_128B | ENA_ADMIN_LIST_ENTRY_SIZE_256B);
         r->u.llq.entry_size_ctrl_enabled =
-            cpu_to_le16(s->llq_enabled ? ENA_ADMIN_LIST_ENTRY_SIZE_128B : 0);
+            cpu_to_le16(s->llq_entry_size == ENA_LLQ_LARGE_ENTRY_SIZE ?
+                        ENA_ADMIN_LIST_ENTRY_SIZE_256B :
+                        s->llq_enabled ? ENA_ADMIN_LIST_ENTRY_SIZE_128B : 0);
         r->u.llq.desc_num_before_header_supported =
             cpu_to_le16(ENA_ADMIN_LLQ_NUM_DESCS_BEFORE_HEADER_2);
         r->u.llq.desc_num_before_header_enabled =
@@ -301,7 +309,9 @@ static int ena_get_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
             cpu_to_le16(s->llq_enabled ? ENA_ADMIN_MULTIPLE_DESCS_PER_ENTRY : 0);
         r->u.llq.feature_version = MIN(c->feat_common.feature_version,
                                        ENA_ADMIN_LLQ_FEATURE_VERSION_1);
-        r->u.llq.entry_size_recommended = ENA_ADMIN_LIST_ENTRY_SIZE_128B;
+        r->u.llq.entry_size_recommended = s->llq_large ?
+            ENA_ADMIN_LIST_ENTRY_SIZE_256B : ENA_ADMIN_LIST_ENTRY_SIZE_128B;
+        /* no double-sized memory BAR: the driver halves the depth for 256B */
         r->u.llq.max_wide_llq_depth = 0;
         r->u.llq.accel_mode.u.get.supported_flags =
             cpu_to_le16(BIT(ENA_ADMIN_DISABLE_META_CACHING));
@@ -428,9 +438,12 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         return ENA_ADMIN_SUCCESS;
     }
 
-    case ENA_ADMIN_LLQ:
+    case ENA_ADMIN_LLQ: {
+        uint16_t entry = le16_to_cpu(c->u.llq.entry_size_ctrl_enabled);
+
         if (le16_to_cpu(c->u.llq.header_location_ctrl_enabled) != ENA_ADMIN_INLINE_HEADER ||
-            le16_to_cpu(c->u.llq.entry_size_ctrl_enabled) != ENA_ADMIN_LIST_ENTRY_SIZE_128B ||
+            (entry != ENA_ADMIN_LIST_ENTRY_SIZE_128B &&
+             entry != ENA_ADMIN_LIST_ENTRY_SIZE_256B) ||
             le16_to_cpu(c->u.llq.desc_num_before_header_enabled) !=
                 ENA_ADMIN_LLQ_NUM_DESCS_BEFORE_HEADER_2 ||
             le16_to_cpu(c->u.llq.descriptors_stride_ctrl_enabled) !=
@@ -438,7 +451,10 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
             return ENA_ADMIN_ILLEGAL_PARAMETER;
         }
         s->llq_enabled = true;
+        s->llq_entry_size = entry == ENA_ADMIN_LIST_ENTRY_SIZE_256B ?
+                            ENA_LLQ_LARGE_ENTRY_SIZE : ENA_LLQ_ENTRY_SIZE;
         return ENA_ADMIN_SUCCESS;
+    }
 
     case ENA_ADMIN_RSS_HASH_FUNCTION: {
         struct ena_admin_feature_rss_flow_hash_control key;

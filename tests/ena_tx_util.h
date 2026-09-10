@@ -26,6 +26,7 @@ typedef struct EnaTxQueue {
     uint32_t db_off;
     uint32_t unmask_off;
     uint32_t llq_off;
+    uint16_t line_size;
     uint64_t sq_ring;
     uint64_t cq_ring;
     uint16_t tail;
@@ -33,18 +34,23 @@ typedef struct EnaTxQueue {
     bool cq_phase;
 } EnaTxQueue;
 
-static inline void ena_tx_enable_llq(QEna *d)
+static inline void ena_tx_enable_llq_size(QEna *d, uint16_t entry_size_ctrl)
 {
     struct ena_admin_set_feat_cmd cmd = {};
 
     cmd.feat_common.feature_id = ENA_ADMIN_LLQ;
     cmd.u.llq.header_location_ctrl_enabled = cpu_to_le16(ENA_ADMIN_INLINE_HEADER);
-    cmd.u.llq.entry_size_ctrl_enabled = cpu_to_le16(ENA_ADMIN_LIST_ENTRY_SIZE_128B);
+    cmd.u.llq.entry_size_ctrl_enabled = cpu_to_le16(entry_size_ctrl);
     cmd.u.llq.desc_num_before_header_enabled =
         cpu_to_le16(ENA_ADMIN_LLQ_NUM_DESCS_BEFORE_HEADER_2);
     cmd.u.llq.descriptors_stride_ctrl_enabled =
         cpu_to_le16(ENA_ADMIN_MULTIPLE_DESCS_PER_ENTRY);
     g_assert_cmpint(ena_set_feature(d, &cmd, 0, 0), ==, ENA_ADMIN_SUCCESS);
+}
+
+static inline void ena_tx_enable_llq(QEna *d)
+{
+    ena_tx_enable_llq_size(d, ENA_ADMIN_LIST_ENTRY_SIZE_128B);
 }
 
 static inline void ena_txq_create(QEna *d, EnaTxQueue *q, uint16_t depth,
@@ -57,6 +63,7 @@ static inline void ena_txq_create(QEna *d, EnaTxQueue *q, uint16_t depth,
     q->depth = depth;
     q->cq_entry_size = cq_words * 4;
     q->llq = llq;
+    q->line_size = ENA_LLQ_LINE_SIZE;
     q->cq_phase = true;
     q->cq_ring = guest_alloc(d->alloc, depth * q->cq_entry_size);
     qtest_memset(d->dev.bus->qts, q->cq_ring, 0, depth * q->cq_entry_size);
@@ -124,13 +131,13 @@ static inline void ena_txq_push(QEna *d, EnaTxQueue *q, const void *desc)
     q->tail++;
 }
 
-/* device placement: write one 128-byte line into the LLQ memory */
+/* device placement: write one line (q->line_size bytes) into the LLQ memory */
 static inline void ena_txq_push_line(QEna *d, EnaTxQueue *q, const void *line)
 {
     g_assert(q->llq);
     qpci_memwrite(&d->dev, d->mem,
-                  q->llq_off + (q->tail & (q->depth - 1)) * ENA_LLQ_LINE_SIZE,
-                  line, ENA_LLQ_LINE_SIZE);
+                  q->llq_off + (q->tail & (q->depth - 1)) * q->line_size,
+                  line, q->line_size);
     q->tail++;
 }
 

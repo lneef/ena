@@ -1,7 +1,7 @@
 # QEMU ENA emulation
 
 A QEMU device model of the Amazon Elastic Network Adapter (`-device ena`),
-implemented against the AWS ENA driver contract (DPDK PMD first).
+implemented against the AWS ENA driver for DPDK.
 
 ```
 hw/              device model (ena.c: PCI/registers, ena_admin.c: admin queue and
@@ -59,7 +59,12 @@ python3 .claude/skills/ena-system-test/inject.py --dst-mac 52:54:00:00:00:02 --c
 
 # multi-queue: one pong thread per vCPU, concurrent flows, RSS distribution check
 python3 tests/system/ena_multiqueue_test.py --vcpus 4 --flows 64
+# same with 256-byte LLQ entries (the device recommends them to the driver)
+python3 tests/system/ena_multiqueue_test.py --device-opts ,llq-large-header=on
 ```
+
+Device properties: `llq-large-header=on|off` (default off) selects whether the
+device recommends 256-byte or 128-byte LLQ entries; both sizes are supported.
 
 The multi-queue test boots the guest itself and exits 0 when every frame is
 echoed with valid checksums and the guest's per-queue counters match the

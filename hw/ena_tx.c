@@ -11,9 +11,9 @@
 #include "hw/ena.h"
 
 #define ENA_TX_DESC_SIZE        sizeof(struct ena_eth_io_tx_desc)
-#define ENA_LLQ_DESCS_PER_ENTRY (ENA_LLQ_ENTRY_SIZE / ENA_TX_DESC_SIZE)
 #define ENA_LLQ_HEADER_OFF      (ENA_LLQ_DESCS_BEFORE_HEADER * ENA_TX_DESC_SIZE)
-#define ENA_TX_MAX_PKT          (65536 + ENA_MAX_TX_HEADER_SIZE)
+#define ENA_LLQ_MAX_HEADER      (ENA_LLQ_LARGE_ENTRY_SIZE - ENA_LLQ_HEADER_OFF)
+#define ENA_TX_MAX_PKT          (65536 + ENA_LLQ_MAX_HEADER)
 
 /* One packet: the descriptor slots from sq->head up to the LAST descriptor. */
 typedef struct EnaTxPkt {
@@ -24,21 +24,27 @@ typedef struct EnaTxPkt {
     EnaTxMeta meta;
 } EnaTxPkt;
 
+/* Descriptors per LLQ entry after the first entry of a packet */
+static unsigned ena_llq_descs_per_entry(const EnaSq *sq)
+{
+    return sq->entry_size / ENA_TX_DESC_SIZE;
+}
+
 /* LLQ entry holding a descriptor slot, relative to the first entry of a packet */
-static unsigned ena_llq_slot_line(unsigned slot)
+static unsigned ena_llq_slot_line(const EnaSq *sq, unsigned slot)
 {
     if (slot < ENA_LLQ_DESCS_BEFORE_HEADER) {
         return 0;
     }
-    return 1 + (slot - ENA_LLQ_DESCS_BEFORE_HEADER) / ENA_LLQ_DESCS_PER_ENTRY;
+    return 1 + (slot - ENA_LLQ_DESCS_BEFORE_HEADER) / ena_llq_descs_per_entry(sq);
 }
 
-static unsigned ena_llq_slot_off(unsigned slot)
+static unsigned ena_llq_slot_off(const EnaSq *sq, unsigned slot)
 {
     if (slot < ENA_LLQ_DESCS_BEFORE_HEADER) {
         return slot * ENA_TX_DESC_SIZE;
     }
-    return ((slot - ENA_LLQ_DESCS_BEFORE_HEADER) % ENA_LLQ_DESCS_PER_ENTRY) *
+    return ((slot - ENA_LLQ_DESCS_BEFORE_HEADER) % ena_llq_descs_per_entry(sq)) *
            ENA_TX_DESC_SIZE;
 }
 
@@ -46,7 +52,7 @@ static unsigned ena_llq_slot_off(unsigned slot)
 static unsigned ena_tx_pkt_entries(const EnaSq *sq, unsigned slots)
 {
     assert(slots > 0);
-    return sq->llq ? ena_llq_slot_line(slots - 1) + 1 : slots;
+    return sq->llq ? ena_llq_slot_line(sq, slots - 1) + 1 : slots;
 }
 
 static void ena_tx_read_slot(EnaState *s, const EnaSq *sq, unsigned slot,
@@ -55,10 +61,10 @@ static void ena_tx_read_slot(EnaState *s, const EnaSq *sq, unsigned slot,
     uint16_t mask = sq->depth - 1;
 
     if (sq->llq) {
-        uint16_t line = (sq->head + ena_llq_slot_line(slot)) & mask;
+        uint16_t line = (sq->head + ena_llq_slot_line(sq, slot)) & mask;
 
-        memcpy(out, ena_llq_mem(s, sq) + line * ENA_LLQ_ENTRY_SIZE +
-                    ena_llq_slot_off(slot), ENA_TX_DESC_SIZE);
+        memcpy(out, ena_llq_mem(s, sq) + line * sq->entry_size +
+                    ena_llq_slot_off(sq, slot), ENA_TX_DESC_SIZE);
     } else {
         ena_dma_read(s, sq->base + ((sq->head + slot) & mask) * ENA_TX_DESC_SIZE,
                      out, ENA_TX_DESC_SIZE);
@@ -70,7 +76,7 @@ static const uint8_t *ena_tx_llq_header(EnaState *s, const EnaSq *sq)
 {
     uint16_t line = sq->head & (sq->depth - 1);
 
-    return ena_llq_mem(s, sq) + line * ENA_LLQ_ENTRY_SIZE + ENA_LLQ_HEADER_OFF;
+    return ena_llq_mem(s, sq) + line * sq->entry_size + ENA_LLQ_HEADER_OFF;
 }
 
 static void ena_tx_free_frag(void *context, void *base, size_t len)
@@ -99,7 +105,7 @@ static void ena_tx_read_meta(EnaTxPkt *p,
 /* Descriptor slot the driver has published ahead of the doorbell */
 static bool ena_tx_slot_posted(const EnaSq *sq, unsigned slot, uint16_t avail)
 {
-    return (sq->llq ? ena_llq_slot_line(slot) : slot) < avail;
+    return (sq->llq ? ena_llq_slot_line(sq, slot) : slot) < avail;
 }
 
 static bool ena_tx_parse(EnaState *s, const EnaSq *sq, EnaTxPkt *p)
@@ -190,7 +196,7 @@ static void ena_tx_xmit(EnaState *s, const EnaSq *sq, const EnaTxPkt *p)
 
     if (!sq->llq) {
         hdr_len = 0;
-    } else if (hdr_len > ENA_MAX_TX_HEADER_SIZE) {
+    } else if (hdr_len > sq->entry_size - ENA_LLQ_HEADER_OFF) {
         qemu_log_mask(LOG_GUEST_ERROR, "ena: tx pushed header of %u bytes\n",
                       hdr_len);
         return;

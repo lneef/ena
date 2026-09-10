@@ -14,6 +14,9 @@
 
 #define NO_VECTOR   0xffffffff
 #define LINE_DESCS  8
+#define LARGE_LINE  256
+#define LARGE_HDR   (LARGE_LINE - ENA_LLQ_HEADER_OFF)
+#define LARGE_DESCS (LARGE_LINE / ENA_TX_DESC_SIZE)
 
 typedef struct EnaLlqLine {
     uint8_t bytes[ENA_LLQ_LINE_SIZE];
@@ -216,6 +219,132 @@ static void test_header_too_long(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(le16_to_cpu(c.sq_head_idx), ==, 1);
 }
 
+/* 256-byte entries: header up to 224 bytes, 16 descriptors per spill entry */
+static void setup_large(QEna *d, EnaTxQueue *q)
+{
+    struct ena_admin_get_feat_resp resp;
+
+    ena_bringup(d);
+    g_assert_cmpint(ena_get_feature(d, ENA_ADMIN_LLQ, 1, 0, 0, &resp), ==,
+                    ENA_ADMIN_SUCCESS);
+    g_assert_cmphex(le16_to_cpu(resp.u.llq.entry_size_ctrl_supported) &
+                    ENA_ADMIN_LIST_ENTRY_SIZE_256B, !=, 0);
+    ena_tx_enable_llq_size(d, ENA_ADMIN_LIST_ENTRY_SIZE_256B);
+    g_assert_cmpint(ena_get_feature(d, ENA_ADMIN_LLQ, 1, 0, 0, &resp), ==,
+                    ENA_ADMIN_SUCCESS);
+    g_assert_cmpuint(le16_to_cpu(resp.u.llq.entry_size_ctrl_enabled), ==,
+                     ENA_ADMIN_LIST_ENTRY_SIZE_256B);
+    /* no wide BAR: 1024 entries of 256 bytes do not fit, the driver halves */
+    g_assert_cmpuint(le16_to_cpu(resp.u.llq.max_wide_llq_depth), ==, 0);
+    ena_txq_create(d, q, 512, 2, NO_VECTOR, true);
+    q->line_size = LARGE_LINE;
+}
+
+static void test_large_depth_limit(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    struct ena_admin_acq_create_cq_resp_desc cq;
+    struct ena_admin_acq_create_sq_resp_desc sq;
+    uint64_t ring = guest_alloc(alloc, 1024 * 16);
+
+    ena_bringup(d);
+    ena_tx_enable_llq_size(d, ENA_ADMIN_LIST_ENTRY_SIZE_256B);
+    g_assert_cmpint(ena_create_cq(d, 1024, 2, NO_VECTOR, ring, &cq), ==,
+                    ENA_ADMIN_SUCCESS);
+    g_assert_cmpint(ena_create_sq(d, true, ENA_ADMIN_PLACEMENT_POLICY_DEV,
+                                  le16_to_cpu(cq.cq_idx), 1024, 0, &sq), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
+    g_assert_cmpint(ena_create_sq(d, true, ENA_ADMIN_PLACEMENT_POLICY_DEV,
+                                  le16_to_cpu(cq.cq_idx), 512, 0, &sq), ==,
+                    ENA_ADMIN_SUCCESS);
+}
+
+static void test_large_header_only(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    EnaTxQueue q;
+    uint8_t line[LARGE_LINE] = {};
+    struct ena_eth_io_tx_desc dsc;
+    struct ena_eth_io_tx_cdesc c;
+    uint8_t frame[LARGE_HDR];
+    size_t len = ena_build_eth(frame, LARGE_HDR - ETH_HLEN);
+
+    setup_large(d, &q);
+    ena_tx_desc_fill(&dsc, 0, 0, 11, ENA_ETH_IO_TX_DESC_FIRST_MASK |
+                     ENA_ETH_IO_TX_DESC_LAST_MASK |
+                     ENA_ETH_IO_TX_DESC_COMP_REQ_MASK, 0, len);
+    memcpy(line, &dsc, ENA_TX_DESC_SIZE);
+    memcpy(line + ENA_LLQ_HEADER_OFF, frame, len);
+    ena_txq_push_line(d, &q, line);
+    ena_txq_doorbell(d, &q);
+
+    expect_frame(ena_backend_fd(data), frame, len);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &c));
+    g_assert_cmpuint(le16_to_cpu(c.req_id), ==, 11);
+    g_assert_cmpuint(le16_to_cpu(c.sq_head_idx), ==, 1);
+}
+
+/* meta + 16 buffers: 2 slots in the first entry, 15 in one 256-byte spill entry */
+static void test_large_spill(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    EnaTxQueue q;
+    uint8_t l0[LARGE_LINE] = {}, l1[LARGE_LINE] = {};
+    struct ena_eth_io_tx_meta_desc m;
+    struct ena_eth_io_tx_desc dsc;
+    struct ena_eth_io_tx_cdesc c;
+    uint8_t frame[LARGE_HDR + 16 * 20];
+    size_t len = ena_build_eth(frame, sizeof(frame) - ETH_HLEN);
+    uint64_t buf = guest_alloc(alloc, len);
+    int i;
+
+    setup_large(d, &q);
+    qtest_memwrite(d->dev.bus->qts, buf, frame, len);
+
+    ena_tx_meta_fill(&m, 0, 20, 14, 5);
+    memcpy(l0, &m, ENA_TX_DESC_SIZE);
+    ena_tx_desc_fill(&dsc, buf + LARGE_HDR, 20, 99, ENA_ETH_IO_TX_DESC_COMP_REQ_MASK,
+                     0, LARGE_HDR);
+    memcpy(l0 + ENA_TX_DESC_SIZE, &dsc, ENA_TX_DESC_SIZE);
+    memcpy(l0 + ENA_LLQ_HEADER_OFF, frame, LARGE_HDR);
+    for (i = 1; i < 16; i++) {
+        ena_tx_desc_fill(&dsc, buf + LARGE_HDR + i * 20, 20, 0,
+                         i == 15 ? ENA_ETH_IO_TX_DESC_LAST_MASK : 0, 0, 0);
+        memcpy(l1 + (i - 1) * ENA_TX_DESC_SIZE, &dsc, ENA_TX_DESC_SIZE);
+    }
+    ena_txq_push_line(d, &q, l0);
+    ena_txq_push_line(d, &q, l1);
+    ena_txq_doorbell(d, &q);
+
+    expect_frame(ena_backend_fd(data), frame, len);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &c));
+    g_assert_cmpuint(le16_to_cpu(c.req_id), ==, 99);
+    g_assert_cmpuint(le16_to_cpu(c.sq_head_idx), ==, 2);
+    g_assert_false(ena_txq_poll_cdesc(d, &q, &c));
+}
+
+/* a 225-byte header does not fit a 256-byte entry */
+static void test_large_header_too_long(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    EnaTxQueue q;
+    uint8_t line[LARGE_LINE] = {};
+    struct ena_eth_io_tx_desc dsc;
+    struct ena_eth_io_tx_cdesc c;
+    uint8_t rx[256];
+
+    setup_large(d, &q);
+    ena_tx_desc_fill(&dsc, 0, 0, 1, ENA_ETH_IO_TX_DESC_FIRST_MASK |
+                     ENA_ETH_IO_TX_DESC_LAST_MASK |
+                     ENA_ETH_IO_TX_DESC_COMP_REQ_MASK, 0, LARGE_HDR + 1);
+    memcpy(line, &dsc, ENA_TX_DESC_SIZE);
+    ena_txq_push_line(d, &q, line);
+    ena_txq_doorbell(d, &q);
+    g_assert_cmpint(ena_backend_recv(ena_backend_fd(data), rx, sizeof(rx)), ==, -1);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &c));
+}
+
 static void register_ena_llq_test(void)
 {
     QOSGraphTestOptions opts = {
@@ -227,6 +356,11 @@ static void register_ena_llq_test(void)
     qos_add_test("llq/spill-lines", "ena", test_spill_lines, &opts);
     qos_add_test("llq/burst-and-wrap", "ena", test_burst_and_wrap, &opts);
     qos_add_test("llq/header-too-long", "ena", test_header_too_long, &opts);
+    qos_add_test("llq/large-depth-limit", "ena", test_large_depth_limit, &opts);
+    qos_add_test("llq/large-header-only", "ena", test_large_header_only, &opts);
+    qos_add_test("llq/large-spill", "ena", test_large_spill, &opts);
+    qos_add_test("llq/large-header-too-long", "ena", test_large_header_too_long,
+                 &opts);
 }
 
 libqos_init(register_ena_llq_test);

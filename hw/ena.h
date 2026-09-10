@@ -51,6 +51,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(EnaState, ENA)
 
 /* LLQ (device placement) memory: one fixed slice of BAR2 per SQ index */
 #define ENA_LLQ_ENTRY_SIZE          128
+#define ENA_LLQ_LARGE_ENTRY_SIZE    256
 #define ENA_LLQ_DESCS_BEFORE_HEADER 2
 #define ENA_LLQ_QUEUE_BYTES         (ENA_MAX_QUEUE_DEPTH * ENA_LLQ_ENTRY_SIZE)
 #define ENA_MEM_BAR_SIZE            (ENA_MAX_SQ * ENA_LLQ_QUEUE_BYTES)
@@ -97,6 +98,7 @@ typedef struct EnaSq {
     uint16_t cq_idx;
     uint64_t base;
     uint16_t depth;
+    uint16_t entry_size;
     uint16_t head;
     uint16_t tail;
     EnaTxMeta meta;
@@ -139,6 +141,8 @@ struct EnaState {
     uint64_t debug_area_addr;
     uint32_t debug_area_size;
     bool llq_enabled;
+    uint16_t llq_entry_size;
+    bool llq_large;
     EnaRss rss;
 
     EnaSq sq[ENA_MAX_SQ];

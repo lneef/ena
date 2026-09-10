@@ -260,6 +260,7 @@ static void ena_dev_reset(EnaState *s)
     s->debug_area_addr = 0;
     s->debug_area_size = 0;
     s->llq_enabled = false;
+    s->llq_entry_size = 0;
     ena_rss_reset(&s->rss);
 
     memset(s->sq, 0, sizeof(s->sq));
@@ -513,6 +514,8 @@ static void ena_qdev_reset_hold(Object *obj, ResetType type)
 
 static const Property ena_properties[] = {
     DEFINE_NIC_PROPERTIES(EnaState, conf),
+    /* recommend 256-byte LLQ entries to the driver instead of 128-byte ones */
+    DEFINE_PROP_BOOL("llq-large-header", EnaState, llq_large, false),
 };
 
 static void ena_class_init(ObjectClass *klass, const void *data)

@@ -165,6 +165,8 @@ static void test_llq_feature(void *obj, void *data, QGuestAllocator *alloc)
                     ENA_ADMIN_INLINE_HEADER, !=, 0);
     g_assert_cmphex(le16_to_cpu(llq->entry_size_ctrl_supported) &
                     ENA_ADMIN_LIST_ENTRY_SIZE_128B, !=, 0);
+    g_assert_cmphex(le16_to_cpu(llq->entry_size_ctrl_supported) &
+                    ENA_ADMIN_LIST_ENTRY_SIZE_256B, !=, 0);
     g_assert_cmphex(le16_to_cpu(llq->desc_num_before_header_supported) &
                     ENA_ADMIN_LLQ_NUM_DESCS_BEFORE_HEADER_2, !=, 0);
     g_assert_cmphex(le16_to_cpu(llq->descriptors_stride_ctrl_supported) &

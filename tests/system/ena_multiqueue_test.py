@@ -91,10 +91,24 @@ def check_echo(echo, src_mac, dst_mac, flows):
     return (fidx, seq), None
 
 
+def udp_rcvbuf_errors():
+    """Udp RcvbufErrors of the host; datagrams lost before QEMU read them."""
+    try:
+        with open("/proc/net/snmp") as f:
+            rows = f.read().splitlines()
+        for i, l in enumerate(rows):
+            if l.startswith("Udp:"):
+                keys, vals = rows[i].split()[1:], rows[i + 1].split()[1:]
+                return int(vals[keys.index("RcvbufErrors")])
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
 def start_guest(a):
     cmd = [os.path.join(a.miniosv, "scripts", "run.py"), "--novnc", "--nogdb",
            "-c", str(a.vcpus), "--qemu-path", a.qemu,
-           "--pass-args=-device ena,netdev=n0,mac=%s" % a.dst_mac,
+           "--pass-args=-device ena,netdev=n0,mac=%s%s" % (a.dst_mac, a.device_opts),
            "--pass-args=-netdev socket,id=n0,udp=127.0.0.1:%d,localaddr=127.0.0.1:%d"
            % (a.listen_port, a.peer_port)]
     proc = subprocess.Popen(cmd, cwd=a.miniosv, stdin=subprocess.DEVNULL,
@@ -133,7 +147,12 @@ def main():
     ap.add_argument("--flows", type=int, default=64)
     ap.add_argument("--frames", type=int, default=16, help="frames per flow")
     ap.add_argument("--senders", type=int, default=4, help="host sender threads")
+    ap.add_argument("--pace-us", type=int, default=0,
+                    help="pause per sender between rounds of frames "
+                         "(default: sized so the burst stays below the UDP socket buffer)")
     ap.add_argument("--dst-mac", default="52:54:00:00:00:02")
+    ap.add_argument("--device-opts", default="",
+                    help="extra -device ena options, e.g. ',llq-large-header=on'")
     ap.add_argument("--src-mac", default="52:54:00:00:00:01")
     ap.add_argument("--dip", default="10.0.0.2")
     ap.add_argument("--dport", type=int, default=1234)
@@ -141,6 +160,9 @@ def main():
     ap.add_argument("--listen-port", type=int, default=1235)
     ap.add_argument("--peer-port", type=int, default=1234)
     a = ap.parse_args()
+    if a.pace_us == 0:
+        # one round sends every flow once; keep the aggregate near 5 MB/s
+        a.pace_us = max(1000, a.flows * (a.ip_len + 14) // 5)
 
     proc, lines, lock, wait_for = start_guest(a)
     try:
@@ -177,8 +199,9 @@ def main():
             for seq in range(a.frames):
                 for f in fl:
                     sock.sendto(frame(src, dst, f, seq, a.ip_len), peer)
-                time.sleep(0.001)
+                time.sleep(a.pace_us / 1e6)
 
+        rcvbuf_before = udp_rcvbuf_errors()
         groups = [flows[i::a.senders] for i in range(a.senders)]
         threads = [threading.Thread(target=sender, args=(g,)) for g in groups]
         for t in threads:
@@ -200,6 +223,10 @@ def main():
         for t in threads:
             t.join()
         print("sent=%d echoed=%d bad=%s" % (want, len(got), bad or 0))
+        host_drops = udp_rcvbuf_errors() - rcvbuf_before
+        if host_drops:
+            print("host kernel dropped %d datagrams on the UDP socket (RcvbufErrors); "
+                  "raise --pace-us" % host_drops)
 
         # the guest reports "queue i rx= tx=" every 2 s; take the last full set
         time.sleep(3)
