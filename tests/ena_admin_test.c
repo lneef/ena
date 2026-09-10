@@ -100,8 +100,11 @@ static void test_host_attr_and_mtu(void *obj, void *data, QGuestAllocator *alloc
     struct ena_admin_set_feat_cmd cmd = {};
     struct ena_admin_get_feat_resp resp;
     uint64_t host_info = guest_alloc(alloc, 4096);
+    struct ena_admin_host_info hi = { .os_type = cpu_to_le32(3) };
 
     ena_bringup(d);
+    /* os_type 3 is ENA_ADMIN_OS_DPDK, the only driver the device accepts */
+    qtest_memwrite(d->dev.bus->qts, host_info, &hi, sizeof(hi));
     cmd.feat_common.feature_id = ENA_ADMIN_HOST_ATTR_CONFIG;
     cmd.u.host_attr.os_info_ba.mem_addr_low = cpu_to_le32(host_info);
     cmd.u.host_attr.os_info_ba.mem_addr_high = cpu_to_le16(host_info >> 32);

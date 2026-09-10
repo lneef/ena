@@ -314,7 +314,8 @@ static void rx_get_stats(QEna *d, uint32_t *pkts, uint32_t *bytes,
 }
 
 /* Writes the application key the way ena_reorder_rss_hash_key does. */
-static void rx_set_rss_key(QEna *d, uint64_t buf, const uint8_t *app_key)
+static void rx_set_rss_key_init(QEna *d, uint64_t buf, const uint8_t *app_key,
+                                uint32_t init_val)
 {
     struct ena_admin_feature_rss_flow_hash_control hc = {};
     struct ena_admin_set_feat_cmd cmd = {};
@@ -332,8 +333,14 @@ static void rx_set_rss_key(QEna *d, uint64_t buf, const uint8_t *app_key)
 
     cmd.feat_common.feature_id = ENA_ADMIN_RSS_HASH_FUNCTION;
     cmd.u.flow_hash_func.selected_func = cpu_to_le32(BIT(ENA_ADMIN_TOEPLITZ));
+    cmd.u.flow_hash_func.init_val = cpu_to_le32(init_val);
     g_assert_cmpint(ena_set_feature(d, &cmd, buf, sizeof(hc)), ==,
                     ENA_ADMIN_SUCCESS);
+}
+
+static void rx_set_rss_key(QEna *d, uint64_t buf, const uint8_t *app_key)
+{
+    rx_set_rss_key_init(d, buf, app_key, 0);
 }
 
 static void rx_set_ind_tbl(QEna *d, uint64_t buf, const uint16_t *cq_idx)
@@ -854,6 +861,29 @@ static void test_rx_rss(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_false(rx_cq_next(&rb, &c));
 }
 
+/* the hash starts from init_val: Toeplitz result XOR init_val */
+static void test_rx_rss_init_val(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    RxRing r;
+    struct ena_eth_io_rx_cdesc_base c;
+    const Flow flow = { 0x0a000001, 0x0a000002, 1000, 2000 };
+    uint64_t ctrl = guest_alloc(alloc, 4096);
+    uint8_t frame[128];
+    size_t len;
+
+    ena_bringup(d);
+    rx_set_rss_key_init(d, ctrl, rss_app_key, 0x12345678);
+    rx_ring_init(&r, d, data, alloc, 16, 16, 4, 1, 2048);
+    rx_post(&r, 2);
+
+    len = build_udp(frame, &flow, 16);
+    ena_backend_send(r.fd, frame, len);
+    rx_wait_cdesc(&r, &c);
+    g_assert_cmpuint(le32_to_cpu(c.hash), ==,
+                     0x12345678 ^ toeplitz_udp4(&flow, rss_app_key));
+}
+
 static void test_rx_rss_fields(void *obj, void *data, QGuestAllocator *alloc)
 {
     QEna *d = obj;
@@ -957,6 +987,7 @@ static void register_ena_rxpath_test(void)
     qos_add_test("rxpath/checksums", "ena", test_rx_checksums, &opts);
     qos_add_test("rxpath/rss", "ena", test_rx_rss, &opts);
     qos_add_test("rxpath/rss-fields", "ena", test_rx_rss_fields, &opts);
+    qos_add_test("rxpath/rss-init-val", "ena", test_rx_rss_init_val, &opts);
     qos_add_test("rxpath/bad-desc", "ena", test_rx_bad_desc, &opts);
 }
 

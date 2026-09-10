@@ -396,11 +396,17 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
     int i;
 
     switch (c->feat_common.feature_id) {
-    case ENA_ADMIN_HOST_ATTR_CONFIG:
+    case ENA_ADMIN_HOST_ATTR_CONFIG: {
+        struct ena_admin_host_info hi;
+
         s->host_info_addr = ena_mem_addr(&c->u.host_attr.os_info_ba);
         s->debug_area_addr = ena_mem_addr(&c->u.host_attr.debug_ba);
         s->debug_area_size = le32_to_cpu(c->u.host_attr.debug_area_size);
+        ena_dma_read(s, s->host_info_addr, &hi, sizeof(hi));
+        /* only the DPDK driver's contract is emulated */
+        assert(le32_to_cpu(hi.os_type) == ENA_ADMIN_OS_DPDK);
         return ENA_ADMIN_SUCCESS;
+    }
 
     case ENA_ADMIN_AENQ_CONFIG: {
         uint32_t groups = le32_to_cpu(c->u.aenq.enabled_groups);

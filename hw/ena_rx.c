@@ -83,7 +83,7 @@ static uint32_t ena_rss_hash(EnaState *s)
     }
 
     ena_rss_key(s, key);
-    return net_rx_pkt_calc_rss_hash(s->rx_pkt, type, key);
+    return s->rss.init_val ^ net_rx_pkt_calc_rss_hash(s->rx_pkt, type, key);
 }
 
 /*

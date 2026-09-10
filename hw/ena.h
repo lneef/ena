@@ -36,6 +36,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(EnaState, ENA)
 #define ENA_RSS_IND_TBL_SIZE        (1 << ENA_RSS_IND_TBL_LOG_SIZE)
 #define ENA_LINK_SPEED_MBPS         10000
 #define ENA_KEEP_ALIVE_INTERVAL_MS  1000
+/* host_info.os_type of the DPDK PMD, the only supported driver */
+#define ENA_ADMIN_OS_DPDK           3
 
 /* BAR layout */
 #define ENA_REG_BAR                 0

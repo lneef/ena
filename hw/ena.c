@@ -208,10 +208,10 @@ void ena_aenq_config(EnaState *s, uint32_t groups)
 
 static void ena_rss_reset(EnaRss *rss)
 {
-    /* Microsoft RSS key; the device reads the key words in reverse order */
+    /* ENA default key: Microsoft's RSS key with its 4-byte words reversed */
     static const uint32_t default_key[ENA_ADMIN_RSS_KEY_PARTS] = {
-        0xbeac01fa, 0x6a42b73b, 0x8030f20c, 0x77cb2da3, 0xae7b30b4,
-        0xd0ca2bcb, 0x43a38fb0, 0x4167253d, 0x255b0ec2, 0x6d5a56da,
+        0x6d5a56da, 0x255b0ec2, 0x4167253d, 0x43a38fb0, 0xd0ca2bcb,
+        0xae7b30b4, 0x77cb2da3, 0x8030f20c, 0x6a42b73b, 0xbeac01fa,
     };
     int i;
 
