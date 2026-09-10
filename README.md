@@ -77,6 +77,42 @@ The multi-queue test boots the guest itself and exits 0 when every frame is
 echoed with valid checksums and the guest's per-queue counters match the
 Toeplitz distribution computed on the host.
 
+## Writing a system test script
+
+`tests/system/ena_multiqueue_test.py` is the template. A host-side test needs no
+root privileges and no guest changes; it works through four pieces:
+
+1. **Boot the guest.** Start `miniosv/scripts/run.py` with `--novnc --nogdb`,
+   `-c <vcpus>` and two `--pass-args`: the device
+   (`-device ena,netdev=n0,mac=<dst-mac>` plus optional properties) and a UDP
+   socket netdev (`-netdev socket,id=n0,udp=127.0.0.1:<listen>,localaddr=127.0.0.1:<peer>`).
+   Read stdout in a thread. The bench prints `queues: N` (one RX/TX pair per
+   vCPU), then `0, 0, 0, 0` once the port is up, and `queue i rx=.. tx=.. irq=..`
+   every 2 s. Treat `ERR`, `no dev`, `configure failed` or `Starting dev failed`
+   as a bring-up failure.
+2. **Inject frames.** The socket netdev carries one Ethernet frame per UDP
+   datagram: bind a socket to `<listen>` and `sendto` raw frames to `<peer>`;
+   frames the guest transmits arrive on the same socket. The pong bench echoes
+   IPv4/UDP frames addressed to its MAC and destination port (defaults
+   `52:54:00:00:00:02`, `10.0.0.2`, port 1234), swapping MACs, IPs and ports and
+   filling in IP and UDP checksums. Everything else is dropped, so a bad frame
+   shows up as a missing echo. Put a flow id and sequence number in the payload
+   to match echoes to what was sent.
+3. **Verify echoes.** Check the swapped addresses, that the IPv4 and UDP
+   checksums verify to zero, and that every (flow, sequence) pair came back.
+   Pace the senders: the netdev's UDP socket is a plain kernel socket, and
+   bursts larger than its buffer are dropped before QEMU reads them
+   (`/proc/net/snmp` `Udp: RcvbufErrors` counts them).
+4. **Check queue placement.** The bench programs an identity indirection table
+   (`entry i -> queue i % N`) and the key `RSS_KEY` in the script. Compute the
+   Toeplitz hash over `src ip, dst ip, src port, dst port` and expect the frame
+   on queue `(hash % 128) % N`; compare against the last `queue i rx=` report.
+   Interrupt-driven guests (`BENCH_RX_IRQ=1`) additionally report `irq=` per
+   queue.
+
+Device-side variants come from `--device-opts` (extra `-device ena` options)
+and guest-side variants from how miniosv was built.
+
 ## Missing for DPDK
 
 Everything the ENA PMD needs to bring the port up and move traffic is
