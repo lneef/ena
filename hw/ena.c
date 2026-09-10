@@ -27,9 +27,9 @@ uint64_t ena_mem_addr(const struct ena_common_mem_addr *addr)
            le32_to_cpu(addr->mem_addr_low);
 }
 
-void ena_dma_read(EnaState *s, uint64_t addr, void *buf, size_t len)
+bool ena_dma_read(EnaState *s, uint64_t addr, void *buf, size_t len)
 {
-    pci_dma_read(PCI_DEVICE(s), addr, buf, len);
+    return pci_dma_read(PCI_DEVICE(s), addr, buf, len) == MEMTX_OK;
 }
 
 void ena_dma_write(EnaState *s, uint64_t addr, const void *buf, size_t len)
@@ -128,7 +128,7 @@ static void ena_cq_unmask_write(EnaState *s, EnaCq *cq, uint32_t val)
 {
     EnaIrq *irq;
 
-    if (!cq->used || cq->msix_vector >= ENA_MSIX_VECTORS) {
+    if (!cq->used || !cq->intr_enabled || cq->msix_vector >= ENA_MSIX_VECTORS) {
         qemu_log_mask(LOG_GUEST_ERROR, "ena: unmask of cq without vector\n");
         return;
     }
@@ -245,25 +245,7 @@ static void ena_rss_reset(EnaRss *rss)
     memcpy(rss->key, default_key, sizeof(rss->key));
     rss->key_parts = ENA_ADMIN_RSS_KEY_PARTS;
     for (i = 0; i < ENA_ADMIN_RSS_PROTO_NUM; i++) {
-        switch (i) {
-        case ENA_ADMIN_RSS_TCP4:
-        case ENA_ADMIN_RSS_UDP4:
-        case ENA_ADMIN_RSS_TCP6:
-        case ENA_ADMIN_RSS_UDP6:
-        case ENA_ADMIN_RSS_TCP6_EX:
-            rss->fields[i] = ENA_ADMIN_RSS_L3_DA | ENA_ADMIN_RSS_L3_SA |
-                             ENA_ADMIN_RSS_L4_DP | ENA_ADMIN_RSS_L4_SP;
-            break;
-        case ENA_ADMIN_RSS_IP4:
-        case ENA_ADMIN_RSS_IP6:
-        case ENA_ADMIN_RSS_IP4_FRAG:
-        case ENA_ADMIN_RSS_IP6_EX:
-            rss->fields[i] = ENA_ADMIN_RSS_L3_DA | ENA_ADMIN_RSS_L3_SA;
-            break;
-        case ENA_ADMIN_RSS_NOT_IP:
-            rss->fields[i] = ENA_ADMIN_RSS_L2_DA | ENA_ADMIN_RSS_L2_SA;
-            break;
-        }
+        rss->fields[i] = ena_rss_supported_fields(i);
     }
 }
 

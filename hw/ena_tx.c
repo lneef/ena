@@ -130,9 +130,9 @@ static bool ena_tx_parse(EnaState *s, const EnaSq *sq, EnaTxPkt *p)
         len_ctrl = le32_to_cpu(d.len_ctrl);
 
         if (len_ctrl & ENA_ETH_IO_TX_DESC_META_DESC_MASK) {
-            if (slot != 0) {
+            if (slot != 0 || !(len_ctrl & ENA_ETH_IO_TX_META_DESC_EXT_VALID_MASK)) {
                 qemu_log_mask(LOG_GUEST_ERROR,
-                              "ena: tx meta descriptor is not first\n");
+                              "ena: tx meta descriptor not first or not ext_valid\n");
                 return false;
             }
             ena_tx_read_meta(p, (const void *)&d);
@@ -262,7 +262,7 @@ static void ena_tx_xmit(EnaState *s, const EnaSq *sq, const EnaTxPkt *p)
         return;
     }
 
-    buf = g_malloc(total);
+    buf = g_malloc0(total);
     if (hdr_len) {
         memcpy(buf, ena_tx_llq_header(s, sq), hdr_len);
     }
@@ -270,7 +270,11 @@ static void ena_tx_xmit(EnaState *s, const EnaSq *sq, const EnaTxPkt *p)
     for (i = 0; i < p->ndesc; i++) {
         uint32_t len = ena_tx_desc_len(&p->desc[i]);
 
-        ena_dma_read(s, ena_tx_desc_addr(&p->desc[i]), buf + total, len);
+        if (!ena_dma_read(s, ena_tx_desc_addr(&p->desc[i]), buf + total, len)) {
+            qemu_log_mask(LOG_GUEST_ERROR, "ena: tx buffer read failed\n");
+            s->tx_drops++;
+            return;
+        }
         total += len;
     }
 
@@ -357,15 +361,15 @@ void ena_tx_doorbell(EnaState *s, EnaSq *sq)
         uint32_t len_ctrl, meta_ctrl;
         uint16_t req_id;
 
-        if (!ena_tx_parse(s, sq, &p)) {
+        /* a malformed packet discards the posted burst */
+        if (!ena_tx_parse(s, sq, &p) || p.ndesc == 0) {
+            qemu_log_mask(LOG_GUEST_ERROR, "ena: tx burst discarded\n");
+            s->tx_drops++;
+            sq->head = sq->tail;
             return;
         }
         if (p.have_meta) {
             sq->meta = p.meta;
-        }
-        if (p.ndesc == 0) {
-            qemu_log_mask(LOG_GUEST_ERROR, "ena: tx packet without a buffer\n");
-            return;
         }
 
         len_ctrl = le32_to_cpu(p.desc[0].len_ctrl);

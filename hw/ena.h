@@ -175,7 +175,8 @@ struct EnaState {
 
 /* ena.c: shared helpers */
 uint64_t ena_mem_addr(const struct ena_common_mem_addr *addr);
-void ena_dma_read(EnaState *s, uint64_t addr, void *buf, size_t len);
+bool ena_dma_read(EnaState *s, uint64_t addr, void *buf, size_t len);
+uint16_t ena_rss_supported_fields(int proto);
 void ena_dma_write(EnaState *s, uint64_t addr, const void *buf, size_t len);
 uint8_t *ena_llq_mem(EnaState *s, const EnaSq *sq);
 /* Writes one completion entry with the current phase already set by the caller. */

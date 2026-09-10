@@ -186,10 +186,12 @@ static int ena_rx_collect(EnaState *s, EnaSq *sq, size_t len,
         if (n == avail || n == ENA_MAX_PKT_DESCS) {
             return -1;
         }
-        ena_dma_read(s, sq->base +
-                     (uint64_t)((sq->head + n) & (sq->depth - 1)) *
-                     sizeof(*desc), &desc[n], sizeof(*desc));
-        if (!ena_rx_desc_valid(sq, &desc[n])) {
+        if (!ena_dma_read(s, sq->base +
+                          (uint64_t)((sq->head + n) & (sq->depth - 1)) *
+                          sizeof(*desc), &desc[n], sizeof(*desc)) ||
+            !ena_rx_desc_valid(sq, &desc[n])) {
+            /* the bad descriptor is consumed so the queue recovers */
+            sq->head += n + 1;
             return -1;
         }
         cap += ena_rx_desc_size(&desc[n]);

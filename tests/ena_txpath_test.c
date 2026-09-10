@@ -343,6 +343,13 @@ static void test_malformed(void *obj, void *data, QGuestAllocator *alloc)
     ena_txq_doorbell(d, &q);
     g_assert_false(ena_txq_poll_cdesc(d, &q, &c));
     g_assert_cmpint(ena_backend_recv(ena_backend_fd(data), rx, sizeof(rx)), ==, -1);
+
+    /* the burst is discarded and the queue keeps working */
+    send_single(d, &q, buf, len, 10);
+    expect_frame(ena_backend_fd(data), frame, len);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &c));
+    g_assert_cmpuint(le16_to_cpu(c.req_id), ==, 10);
+    g_assert_cmpuint(le16_to_cpu(c.sq_head_idx), ==, 2);
 }
 
 /* A foreign source MAC is completed by the NIC but dropped by the fabric. */

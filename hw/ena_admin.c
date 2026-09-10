@@ -159,8 +159,9 @@ static int ena_create_sq(EnaState *s, const struct ena_admin_aq_entry *cmd,
     if (cq_idx >= ENA_MAX_CQ || !s->cq[cq_idx].used || !ena_valid_depth(depth)) {
         return ENA_ADMIN_ILLEGAL_PARAMETER;
     }
-    /* one completion slot per submitted descriptor */
-    if (depth > s->cq[cq_idx].depth || (!llq && !ena_mem_addr(&c->sq_ba))) {
+    /* one completion slot per submitted descriptor; RX completions are 4+ words */
+    if (depth > s->cq[cq_idx].depth || (!llq && !ena_mem_addr(&c->sq_ba)) ||
+        (!is_tx && s->cq[cq_idx].entry_size < sizeof(struct ena_eth_io_rx_cdesc_base))) {
         return ENA_ADMIN_ILLEGAL_PARAMETER;
     }
     if (ena_mem_addr(&c->sq_head_writeback)) {
@@ -224,7 +225,7 @@ static uint64_t ena_ctrl_buf(uint8_t flags,
 }
 
 /* Non-IP frames and IPv6 with extension headers (the _EX protocols) are not hashed. */
-static uint16_t ena_rss_supported_fields(int proto)
+uint16_t ena_rss_supported_fields(int proto)
 {
     switch (proto) {
     case ENA_ADMIN_RSS_TCP4:

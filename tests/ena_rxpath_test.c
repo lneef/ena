@@ -1041,6 +1041,15 @@ static void test_rx_rss_fields(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(le32_to_cpu(c.hash), ==, 0);
 }
 
+static void rx_post_raw(RxRing *r, const struct ena_eth_io_rx_desc *desc)
+{
+    qtest_memwrite(rx_qts(r), r->sq_base + (r->tail & (r->depth - 1)) *
+                   sizeof(*desc), desc, sizeof(*desc));
+    r->tail++;
+    ena_reg_write(r->d, SQ_DB_BASE + r->sq_idx * 4, r->tail);
+}
+
+/* Bad descriptors are consumed and counted; the queue keeps working. */
 static void test_rx_bad_desc(void *obj, void *data, QGuestAllocator *alloc)
 {
     QEna *d = obj;
@@ -1059,11 +1068,10 @@ static void test_rx_bad_desc(void *obj, void *data, QGuestAllocator *alloc)
     desc.buff_addr_hi = cpu_to_le16(r.buf_base >> 32);
 
     /* req_id outside the ring */
-    desc.ctrl = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_LAST_MASK;
+    desc.ctrl = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_LAST_MASK |
+                ENA_ETH_IO_RX_DESC_COMP_REQ_MASK;
     desc.req_id = cpu_to_le16(16);
-    qtest_memwrite(rx_qts(&r), r.sq_base, &desc, sizeof(desc));
-    r.tail = 1;
-    ena_reg_write(d, SQ_DB_BASE + r.sq_idx * 4, r.tail);
+    rx_post_raw(&r, &desc);
     ena_backend_send(r.fd, frame, len);
     rx_settle(&r);
     g_assert_false(rx_cq_next(&r, &c));
@@ -1071,16 +1079,14 @@ static void test_rx_bad_desc(void *obj, void *data, QGuestAllocator *alloc)
     /* descriptor without first|last */
     desc.ctrl = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_COMP_REQ_MASK;
     desc.req_id = 0;
-    qtest_memwrite(rx_qts(&r), r.sq_base, &desc, sizeof(desc));
-    ena_reg_write(d, SQ_DB_BASE + r.sq_idx * 4, r.tail);
+    rx_post_raw(&r, &desc);
     ena_backend_send(r.fd, frame, len);
     rx_settle(&r);
     g_assert_false(rx_cq_next(&r, &c));
 
     /* descriptor without a completion request */
     desc.ctrl = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_LAST_MASK;
-    qtest_memwrite(rx_qts(&r), r.sq_base, &desc, sizeof(desc));
-    ena_reg_write(d, SQ_DB_BASE + r.sq_idx * 4, r.tail);
+    rx_post_raw(&r, &desc);
     ena_backend_send(r.fd, frame, len);
     rx_settle(&r);
     g_assert_false(rx_cq_next(&r, &c));
@@ -1090,20 +1096,24 @@ static void test_rx_bad_desc(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(bytes, ==, 0);
     g_assert_cmpuint(drops, ==, 3);
 
-    /* a doorbell more than depth ahead of the head is ignored */
+    /* a doorbell more than depth ahead of the head is ignored; with no
+     * descriptor posted the backend holds the frame back */
     ena_reg_write(d, SQ_DB_BASE + r.sq_idx * 4, r.tail + 17);
     ena_backend_send(r.fd, frame, len);
     rx_settle(&r);
     g_assert_false(rx_cq_next(&r, &c));
 
-    /* a well formed descriptor is still accepted afterwards */
+    /* the bad descriptors were consumed: a good one right behind them works */
     desc.ctrl = ENA_ETH_IO_RX_DESC_FIRST_MASK | ENA_ETH_IO_RX_DESC_LAST_MASK |
                 ENA_ETH_IO_RX_DESC_COMP_REQ_MASK;
-    qtest_memwrite(rx_qts(&r), r.sq_base, &desc, sizeof(desc));
-    ena_reg_write(d, SQ_DB_BASE + r.sq_idx * 4, r.tail);
+    desc.req_id = cpu_to_le16(3);
+    rx_post_raw(&r, &desc);
     ena_backend_send(r.fd, frame, len);
     rx_wait_cdesc(&r, &c);
     g_assert_cmpuint(le16_to_cpu(c.length), ==, len);
+    g_assert_cmpuint(le16_to_cpu(c.req_id), ==, 3);
+    rx_get_stats(d, &pkts, &bytes, &drops);
+    g_assert_cmpuint(drops, ==, 3);
 }
 
 static void register_ena_rxpath_test(void)

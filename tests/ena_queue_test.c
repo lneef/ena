@@ -140,6 +140,11 @@ static void test_sq_bad_params(void *obj, void *data, QGuestAllocator *alloc)
                     ENA_ADMIN_ILLEGAL_PARAMETER);
     g_assert_cmpint(ena_create_sq(d, true, 0, cq_idx, 1024, ring, &sq), ==,
                     ENA_ADMIN_ILLEGAL_PARAMETER);
+    /* RX completions need 4 or 8 words */
+    g_assert_cmpint(ena_create_cq(d, 16, 2, 1, ring, &cq), ==, ENA_ADMIN_SUCCESS);
+    g_assert_cmpint(ena_create_sq(d, false, ENA_ADMIN_PLACEMENT_POLICY_HOST,
+                                  le16_to_cpu(cq.cq_idx), 16, ring, &sq), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
     /* the SQ may not be deeper than its CQ; a host ring needs an address */
     g_assert_cmpint(ena_create_cq(d, 16, 4, 1, ring, &cq), ==, ENA_ADMIN_SUCCESS);
     g_assert_cmpint(ena_create_sq(d, true, ENA_ADMIN_PLACEMENT_POLICY_HOST,
