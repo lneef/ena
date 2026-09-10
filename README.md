@@ -69,3 +69,19 @@ device recommends 256-byte or 128-byte LLQ entries; both sizes are supported.
 The multi-queue test boots the guest itself and exits 0 when every frame is
 echoed with valid checksums and the guest's per-queue counters match the
 Toeplitz distribution computed on the host.
+
+## Missing for DPDK
+
+Everything the ENA PMD needs to bring the port up and move traffic is
+implemented. Not implemented, and either skipped or degraded gracefully by the
+PMD:
+
+- extended statistics: ENI, ENA SRD and customer metrics (`xstats`), only basic
+  stats exist
+- HW hints (driver timeouts) and the AENQ notification, warning, fatal-error and
+  configuration-notification groups
+- fragment bypass and HW RX timestamping
+- RSS: CRC32 hash function, symmetric hashing (`input_sort`), per-field
+  source-only/destination-only selection
+- LLQ TX burst limit (`LIMIT_TX_BURST` accelerated mode)
+- second device id `1d0f:ec21`, live migration
