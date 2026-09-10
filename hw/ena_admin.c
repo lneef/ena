@@ -86,10 +86,6 @@ static int ena_create_cq(EnaState *s, const struct ena_admin_aq_entry *cmd,
     cq->msix_vector = le32_to_cpu(c->msix_vector);
     cq->tail = 0;
     cq->phase = true;
-    cq->unmasked = false;
-    cq->intr_pending = false;
-    cq->rx_delay_us = 0;
-    cq->tx_delay_us = 0;
 
     r->cq_idx = cpu_to_le16(i);
     r->cq_actual_depth = cpu_to_le16(depth);
@@ -109,7 +105,6 @@ static int ena_destroy_cq(EnaState *s, const struct ena_admin_aq_entry *cmd,
     if (idx >= ENA_MAX_CQ || !s->cq[idx].used) {
         return ENA_ADMIN_ILLEGAL_PARAMETER;
     }
-    timer_del(s->cq[idx].moder_timer);
     s->cq[idx].used = false;
     return ENA_ADMIN_SUCCESS;
 }

@@ -76,57 +76,76 @@ void ena_cq_push(EnaState *s, EnaCq *cq, const void *cdesc)
     }
 }
 
-static void ena_cq_fire(EnaCq *cq)
+static void ena_irq_fire(EnaIrq *irq)
 {
-    timer_del(cq->moder_timer);
-    cq->unmasked = false;
-    cq->intr_pending = false;
-    msix_notify(PCI_DEVICE(cq->s), cq->msix_vector);
+    timer_del(irq->moder_timer);
+    irq->unmasked = false;
+    irq->rx_pending = false;
+    irq->tx_pending = false;
+    msix_notify(PCI_DEVICE(irq->s), irq->vector);
 }
 
-static void ena_cq_moder_timer(void *opaque)
+static void ena_irq_moder_timer(void *opaque)
 {
-    ena_cq_fire(opaque);
+    ena_irq_fire(opaque);
 }
 
-static void ena_cq_schedule(EnaCq *cq, bool is_tx)
+static void ena_irq_schedule(EnaIrq *irq, uint32_t delay_us)
 {
-    uint32_t delay = is_tx ? cq->tx_delay_us : cq->rx_delay_us;
-
-    if (delay == 0) {
-        ena_cq_fire(cq);
-    } else if (!timer_pending(cq->moder_timer)) {
-        timer_mod(cq->moder_timer,
-                  qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) + delay);
+    if (delay_us == 0) {
+        ena_irq_fire(irq);
+        return;
     }
+    timer_mod_anticipate(irq->moder_timer,
+                         qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) + delay_us);
 }
 
 void ena_cq_intr(EnaState *s, EnaCq *cq, bool is_tx)
 {
+    EnaIrq *irq;
+
     if (!cq->intr_enabled || cq->msix_vector >= ENA_MSIX_VECTORS) {
         return;
     }
-    cq->pending_is_tx = is_tx;
-    if (!cq->unmasked) {
-        cq->intr_pending = true;
+    irq = &s->irq[cq->msix_vector];
+    if (!irq->unmasked) {
+        if (is_tx) {
+            irq->tx_pending = true;
+        } else {
+            irq->rx_pending = true;
+        }
         return;
     }
-    ena_cq_schedule(cq, is_tx);
+    ena_irq_schedule(irq, is_tx ? irq->tx_delay_us : irq->rx_delay_us);
 }
 
+/*
+ * The unmask register of any CQ re-arms the vector the CQ is bound to.
+ * FreeBSD and Linux write only the TX CQ register of an RX/TX pair.
+ */
 static void ena_cq_unmask_write(EnaState *s, EnaCq *cq, uint32_t val)
 {
-    if (!cq->used) {
+    EnaIrq *irq;
+
+    if (!cq->used || cq->msix_vector >= ENA_MSIX_VECTORS) {
         return;
     }
+    irq = &s->irq[cq->msix_vector];
     if (!(val & ENA_ETH_IO_INTR_REG_NO_MODERATION_UPDATE_MASK)) {
-        cq->rx_delay_us = val & ENA_ETH_IO_INTR_REG_RX_INTR_DELAY_MASK;
-        cq->tx_delay_us = (val & ENA_ETH_IO_INTR_REG_TX_INTR_DELAY_MASK) >>
-                          ENA_ETH_IO_INTR_REG_TX_INTR_DELAY_SHIFT;
+        irq->rx_delay_us = val & ENA_ETH_IO_INTR_REG_RX_INTR_DELAY_MASK;
+        irq->tx_delay_us = (val & ENA_ETH_IO_INTR_REG_TX_INTR_DELAY_MASK) >>
+                           ENA_ETH_IO_INTR_REG_TX_INTR_DELAY_SHIFT;
     }
-    cq->unmasked = !!(val & ENA_ETH_IO_INTR_REG_INTR_UNMASK_MASK);
-    if (cq->unmasked && cq->intr_pending) {
-        ena_cq_schedule(cq, cq->pending_is_tx);
+    irq->unmasked = !!(val & ENA_ETH_IO_INTR_REG_INTR_UNMASK_MASK);
+    if (!irq->unmasked) {
+        timer_del(irq->moder_timer);
+        return;
+    }
+    if (irq->rx_pending) {
+        ena_irq_schedule(irq, irq->rx_delay_us);
+    }
+    if (irq->tx_pending) {
+        ena_irq_schedule(irq, irq->tx_delay_us);
     }
 }
 
@@ -264,11 +283,12 @@ static void ena_dev_reset(EnaState *s)
     ena_rss_reset(&s->rss);
 
     memset(s->sq, 0, sizeof(s->sq));
-    for (i = 0; i < ENA_MAX_CQ; i++) {
-        EnaCq *cq = &s->cq[i];
+    memset(s->cq, 0, sizeof(s->cq));
+    for (i = 0; i < ENA_MSIX_VECTORS; i++) {
+        EnaIrq *irq = &s->irq[i];
 
-        timer_del(cq->moder_timer);
-        memset(cq, 0, offsetof(EnaCq, moder_timer));
+        timer_del(irq->moder_timer);
+        memset(irq, 0, offsetof(EnaIrq, moder_timer));
     }
     ena_stats_reset(s);
 
@@ -485,10 +505,11 @@ static void ena_realize(PCIDevice *pci_dev, Error **errp)
     net_rx_pkt_init(&s->rx_pkt);
 
     s->keep_alive_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, ena_keep_alive, s);
-    for (i = 0; i < ENA_MAX_CQ; i++) {
-        s->cq[i].s = s;
-        s->cq[i].moder_timer = timer_new_us(QEMU_CLOCK_VIRTUAL,
-                                            ena_cq_moder_timer, &s->cq[i]);
+    for (i = 0; i < ENA_MSIX_VECTORS; i++) {
+        s->irq[i].s = s;
+        s->irq[i].vector = i;
+        s->irq[i].moder_timer = timer_new_us(QEMU_CLOCK_VIRTUAL,
+                                             ena_irq_moder_timer, &s->irq[i]);
     }
 }
 
@@ -497,8 +518,8 @@ static void ena_exit(PCIDevice *pci_dev)
     EnaState *s = ENA(pci_dev);
     int i;
 
-    for (i = 0; i < ENA_MAX_CQ; i++) {
-        timer_free(s->cq[i].moder_timer);
+    for (i = 0; i < ENA_MSIX_VECTORS; i++) {
+        timer_free(s->irq[i].moder_timer);
     }
     timer_free(s->keep_alive_timer);
     net_tx_pkt_uninit(s->tx_pkt);

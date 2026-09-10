@@ -75,14 +75,19 @@ typedef struct EnaCq {
     uint32_t msix_vector;
     uint16_t tail;
     bool phase;
+} EnaCq;
+
+/* Interrupt state of one MSI-X vector, shared by the CQs bound to it. */
+typedef struct EnaIrq {
     bool unmasked;
-    bool intr_pending;
-    bool pending_is_tx;
+    bool rx_pending;
+    bool tx_pending;
     uint32_t rx_delay_us;
     uint32_t tx_delay_us;
     QEMUTimer *moder_timer;
+    uint32_t vector;
     EnaState *s;
-} EnaCq;
+} EnaIrq;
 
 typedef struct EnaTxMeta {
     uint16_t mss;
@@ -147,6 +152,7 @@ struct EnaState {
 
     EnaSq sq[ENA_MAX_SQ];
     EnaCq cq[ENA_MAX_CQ];
+    EnaIrq irq[ENA_MSIX_VECTORS];
 
     struct NetTxPkt *tx_pkt;
     struct NetRxPkt *rx_pkt;

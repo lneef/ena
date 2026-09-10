@@ -11,6 +11,7 @@
 #include "net/eth.h"
 #include "net/checksum.h"
 #include "tests/ena_qos.h"
+#include "tests/ena_tx_util.h"
 
 #define SQ_DB_BASE      0x1000
 #define CQ_UNMASK_BASE  0x2000
@@ -732,6 +733,94 @@ static void test_rx_intr_disabled(void *obj, void *data,
     g_assert_false(ena_msix_fired(d, ENA_TEST_ADMIN_VECTOR));
 }
 
+/* one TX frame with completion requested */
+static void tx_send(QEna *d, EnaTxQueue *q, uint64_t buf, size_t len)
+{
+    struct ena_eth_io_tx_desc dsc;
+
+    ena_tx_desc_fill(&dsc, buf, len, 0, ENA_ETH_IO_TX_DESC_FIRST_MASK |
+                     ENA_ETH_IO_TX_DESC_LAST_MASK |
+                     ENA_ETH_IO_TX_DESC_COMP_REQ_MASK, 0, 0);
+    ena_txq_push(d, q, &dsc);
+    ena_txq_doorbell(d, q);
+}
+
+/*
+ * FreeBSD binds the RX and TX CQ of a queue pair to one vector and re-arms
+ * it through the TX CQ register only (ena_datapath.c:117-120).
+ */
+static void test_rx_intr_shared_vector(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    RxRing r;
+    EnaTxQueue q;
+    struct ena_eth_io_rx_cdesc_base c;
+    struct ena_eth_io_tx_cdesc tc;
+    const Flow flow = { 0x0a000001, 0x0a000002, 1000, 2000 };
+    uint8_t frame[128];
+    uint8_t tx_frame[64];
+    size_t len = build_udp(frame, &flow, 16);
+    size_t tx_len = ena_build_eth(tx_frame, 32);
+    uint64_t tx_buf = guest_alloc(alloc, sizeof(tx_frame));
+    uint32_t val;
+
+    ena_bringup(d);
+    rx_ring_init(&r, d, data, alloc, 16, 16, 4, 1, 2048);
+    ena_txq_create(d, &q, 16, 2, 1, false);
+    g_assert_cmpuint(q.cq_idx, !=, r.cq_idx);
+    ena_msix_setup(d, 1);
+    rx_post(&r, 8);
+    qtest_memwrite(rx_qts(&r), tx_buf, tx_frame, tx_len);
+
+    /* the TX CQ register arms the vector for RX completions */
+    ena_reg_write(d, q.unmask_off, ENA_ETH_IO_INTR_REG_INTR_UNMASK_MASK);
+    ena_backend_send(r.fd, frame, len);
+    rx_wait_cdesc(&r, &c);
+    g_assert_true(ena_msix_fired(d, 1));
+    ena_msix_clear(d, 1);
+
+    /* auto-masked: RX and TX completions pend on the vector */
+    tx_send(d, &q, tx_buf, tx_len);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &tc));
+    ena_backend_send(r.fd, frame, len);
+    rx_wait_cdesc(&r, &c);
+    g_assert_false(ena_msix_fired(d, 1));
+
+    /* one re-arm delivers one interrupt for both */
+    ena_reg_write(d, q.unmask_off, ENA_ETH_IO_INTR_REG_INTR_UNMASK_MASK);
+    g_assert_true(ena_msix_fired(d, 1));
+    ena_msix_clear(d, 1);
+    ena_reg_write(d, q.unmask_off, ENA_ETH_IO_INTR_REG_INTR_UNMASK_MASK);
+    g_assert_false(ena_msix_fired(d, 1));
+
+    /* masking through the RX CQ register masks the vector for TX too */
+    ena_reg_write(d, CQ_UNMASK_BASE + r.cq_idx * 4, 0);
+    tx_send(d, &q, tx_buf, tx_len);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &tc));
+    g_assert_false(ena_msix_fired(d, 1));
+
+    /* rx and tx delays apply per completion type on the same vector */
+    val = ENA_ETH_IO_INTR_REG_INTR_UNMASK_MASK | MODER_DELAY_US |
+          ((2 * MODER_DELAY_US) << ENA_ETH_IO_INTR_REG_TX_INTR_DELAY_SHIFT);
+    ena_reg_write(d, q.unmask_off, val);
+    g_assert_false(ena_msix_fired(d, 1));
+    qtest_clock_step(rx_qts(&r), (2 * MODER_DELAY_US - 100) * 1000);
+    g_assert_false(ena_msix_fired(d, 1));
+    qtest_clock_step(rx_qts(&r), 200 * 1000);
+    g_assert_true(ena_msix_fired(d, 1));
+    ena_msix_clear(d, 1);
+
+    ena_reg_write(d, q.unmask_off, val);
+    ena_backend_send(r.fd, frame, len);
+    rx_wait_cdesc(&r, &c);
+    g_assert_false(ena_msix_fired(d, 1));
+    qtest_clock_step(rx_qts(&r), (MODER_DELAY_US - SETTLE_STEPS) * 1000);
+    g_assert_false(ena_msix_fired(d, 1));
+    qtest_clock_step(rx_qts(&r), SETTLE_STEPS * 1000);
+    g_assert_true(ena_msix_fired(d, 1));
+}
+
 static void test_rx_checksums(void *obj, void *data, QGuestAllocator *alloc)
 {
     QEna *d = obj;
@@ -984,6 +1073,8 @@ static void register_ena_rxpath_test(void)
     qos_add_test("rxpath/intr-moderation", "ena", test_rx_intr_moderation,
                  &opts);
     qos_add_test("rxpath/intr-disabled", "ena", test_rx_intr_disabled, &opts);
+    qos_add_test("rxpath/intr-shared-vector", "ena",
+                 test_rx_intr_shared_vector, &opts);
     qos_add_test("rxpath/checksums", "ena", test_rx_checksums, &opts);
     qos_add_test("rxpath/rss", "ena", test_rx_rss, &opts);
     qos_add_test("rxpath/rss-fields", "ena", test_rx_rss_fields, &opts);
