@@ -93,6 +93,43 @@ static void test_multi_desc(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(le16_to_cpu(c.sq_head_idx), ==, 3);
 }
 
+/* A packet may use ENA_MAX_PKT_DESCS buffers plus a meta descriptor. */
+static void test_max_descs_with_meta(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    EnaTxQueue q;
+    struct ena_eth_io_tx_desc dsc;
+    struct ena_eth_io_tx_meta_desc m;
+    struct ena_eth_io_tx_cdesc c;
+    uint8_t frame[17 * 8];
+    size_t len;
+    uint64_t buf = guest_alloc(alloc, sizeof(frame));
+    int i;
+
+    len = ena_build_eth(frame, sizeof(frame) - ETH_HLEN);
+    ena_bringup(d);
+    ena_txq_create(d, &q, 1024, 2, NO_VECTOR, false);
+    qtest_memwrite(d->dev.bus->qts, buf, frame, len);
+
+    ena_tx_meta_fill(&m, 0, 0, 0, 0);
+    ena_txq_push(d, &q, &m);
+    for (i = 0; i < 17; i++) {
+        /* completion request and req_id travel in the first buffer descriptor */
+        uint32_t flags = i == 0 ? ENA_ETH_IO_TX_DESC_COMP_REQ_MASK :
+                         i == 16 ? ENA_ETH_IO_TX_DESC_LAST_MASK : 0;
+
+        ena_tx_desc_fill(&dsc, buf + i * 8, 8, 77, flags, 0, 0);
+        ena_txq_push(d, &q, &dsc);
+    }
+    ena_txq_doorbell(d, &q);
+
+    expect_frame(ena_backend_fd(data), frame, len);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &c));
+    g_assert_cmpuint(le16_to_cpu(c.req_id), ==, 77);
+    g_assert_cmpuint(le16_to_cpu(c.sq_head_idx), ==, 18);
+}
+
 static void test_meta_and_no_completion(void *obj, void *data,
                                         QGuestAllocator *alloc)
 {
@@ -387,6 +424,8 @@ static void register_ena_txpath_test(void)
     qos_add_test("txpath/unsupported-flags", "ena", test_unsupported_flags,
                  &opts);
     qos_add_test("txpath/multi-desc", "ena", test_multi_desc, &opts);
+    qos_add_test("txpath/max-descs-with-meta", "ena", test_max_descs_with_meta,
+                 &opts);
     qos_add_test("txpath/meta-and-no-completion", "ena",
                  test_meta_and_no_completion, &opts);
     qos_add_test("txpath/ring-wrap", "ena", test_ring_wrap, &opts);

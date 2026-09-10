@@ -52,6 +52,7 @@ void ena_stats_reset(EnaState *s)
     s->rx_pkts = 0;
     s->rx_bytes = 0;
     s->rx_drops = 0;
+    s->tx_drops = 0;
 }
 
 /* Admin completions and AENQ events share MSI-X vector 0. */

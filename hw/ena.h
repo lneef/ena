@@ -170,6 +170,7 @@ struct EnaState {
     uint64_t rx_pkts;
     uint64_t rx_bytes;
     uint64_t rx_drops;
+    uint64_t tx_drops;
 };
 
 /* ena.c: shared helpers */

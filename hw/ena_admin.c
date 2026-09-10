@@ -70,6 +70,9 @@ static int ena_create_cq(EnaState *s, const struct ena_admin_aq_entry *cmd,
     if (!ena_valid_depth(depth) || (words != 2 && words != 4 && words != 8)) {
         return ENA_ADMIN_ILLEGAL_PARAMETER;
     }
+    if (!ena_mem_addr(&c->cq_ba)) {
+        return ENA_ADMIN_ILLEGAL_PARAMETER;
+    }
     /* IO vectors are 1..8; -1 means no interrupt */
     if ((c->cq_caps_1 & ENA_ADMIN_AQ_CREATE_CQ_CMD_INTERRUPT_MODE_ENABLED_MASK) &&
         vector != ENA_MSIX_VECTOR_NONE &&
@@ -107,9 +110,15 @@ static int ena_destroy_cq(EnaState *s, const struct ena_admin_aq_entry *cmd,
 {
     const struct ena_admin_aq_destroy_cq_cmd *c = (const void *)cmd;
     uint16_t idx = le16_to_cpu(c->cq_idx);
+    int i;
 
     if (idx >= ENA_MAX_CQ || !s->cq[idx].used) {
         return ENA_ADMIN_ILLEGAL_PARAMETER;
+    }
+    for (i = 0; i < ENA_MAX_SQ; i++) {
+        if (s->sq[i].used && s->sq[i].cq_idx == idx) {
+            return ENA_ADMIN_RESOURCE_BUSY;
+        }
     }
     s->cq[idx].used = false;
     return ENA_ADMIN_SUCCESS;
@@ -149,6 +158,13 @@ static int ena_create_sq(EnaState *s, const struct ena_admin_aq_entry *cmd,
     }
     if (cq_idx >= ENA_MAX_CQ || !s->cq[cq_idx].used || !ena_valid_depth(depth)) {
         return ENA_ADMIN_ILLEGAL_PARAMETER;
+    }
+    /* one completion slot per submitted descriptor */
+    if (depth > s->cq[cq_idx].depth || (!llq && !ena_mem_addr(&c->sq_ba))) {
+        return ENA_ADMIN_ILLEGAL_PARAMETER;
+    }
+    if (ena_mem_addr(&c->sq_head_writeback)) {
+        ena_unsupported("sq head writeback");
     }
     for (i = 0; i < ENA_MAX_SQ && s->sq[i].used; i++) {
     }
@@ -207,7 +223,7 @@ static uint64_t ena_ctrl_buf(uint8_t flags,
     return ena_mem_addr(&info->address);
 }
 
-/* Non-IP frames are not hashed. */
+/* Non-IP frames and IPv6 with extension headers (the _EX protocols) are not hashed. */
 static uint16_t ena_rss_supported_fields(int proto)
 {
     switch (proto) {
@@ -215,12 +231,10 @@ static uint16_t ena_rss_supported_fields(int proto)
     case ENA_ADMIN_RSS_UDP4:
     case ENA_ADMIN_RSS_TCP6:
     case ENA_ADMIN_RSS_UDP6:
-    case ENA_ADMIN_RSS_TCP6_EX:
         return ENA_RSS_L3L4_FIELDS;
     case ENA_ADMIN_RSS_IP4:
     case ENA_ADMIN_RSS_IP6:
     case ENA_ADMIN_RSS_IP4_FRAG:
-    case ENA_ADMIN_RSS_IP6_EX:
         return ENA_RSS_L3_FIELDS;
     default:
         return 0;
@@ -247,6 +261,9 @@ static int ena_get_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
     uint64_t buf;
     int i;
 
+    if (c->feat_common.flags & ENA_ADMIN_GET_SET_FEATURE_COMMON_DESC_SELECT_MASK) {
+        ena_unsupported("feature select 0x%x", c->feat_common.flags);
+    }
     switch (c->feat_common.feature_id) {
     case ENA_ADMIN_DEVICE_ATTRIBUTES:
         r->u.dev_attr.impl_id = cpu_to_le32(ENA_CTRL_VERSION_IMPL_ID);
@@ -355,6 +372,7 @@ static int ena_get_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         r->u.flow_hash_func.supported_func = cpu_to_le32(BIT(ENA_ADMIN_TOEPLITZ));
         r->u.flow_hash_func.selected_func = cpu_to_le32(BIT(ENA_ADMIN_TOEPLITZ));
         r->u.flow_hash_func.init_val = cpu_to_le32(s->rss.init_val);
+        /* the driver reads supported_func without a buffer (ena_com.c:2767) */
         buf = ena_ctrl_buf(c->aq_common_descriptor.flags, &c->control_buffer, sizeof(key));
         if (buf) {
             memset(&key, 0, sizeof(key));
@@ -411,6 +429,9 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
     uint64_t buf;
     int i;
 
+    if (c->feat_common.flags & ENA_ADMIN_GET_SET_FEATURE_COMMON_DESC_SELECT_MASK) {
+        ena_unsupported("feature select 0x%x", c->feat_common.flags);
+    }
     switch (c->feat_common.feature_id) {
     case ENA_ADMIN_HOST_ATTR_CONFIG: {
         struct ena_admin_host_info hi;
@@ -418,6 +439,9 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         s->host_info_addr = ena_mem_addr(&c->u.host_attr.os_info_ba);
         s->debug_area_addr = ena_mem_addr(&c->u.host_attr.debug_ba);
         s->debug_area_size = le32_to_cpu(c->u.host_attr.debug_area_size);
+        if (!s->host_info_addr) {
+            return ENA_ADMIN_ILLEGAL_PARAMETER;
+        }
         ena_dma_read(s, s->host_info_addr, &hi, sizeof(hi));
         /* only the DPDK driver's contract is emulated */
         assert(le32_to_cpu(hi.os_type) == ENA_ADMIN_OS_DPDK);
@@ -471,15 +495,16 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
             return ENA_ADMIN_ILLEGAL_PARAMETER;
         }
         buf = ena_ctrl_buf(c->aq_common_descriptor.flags, &c->control_buffer, sizeof(key));
-        if (buf) {
-            ena_dma_read(s, buf, &key, sizeof(key));
-            if (le32_to_cpu(key.key_parts) != ENA_ADMIN_RSS_KEY_PARTS) {
-                return ENA_ADMIN_ILLEGAL_PARAMETER;
-            }
-            s->rss.key_parts = le32_to_cpu(key.key_parts);
-            for (i = 0; i < ENA_ADMIN_RSS_KEY_PARTS; i++) {
-                s->rss.key[i] = le32_to_cpu(key.key[i]);
-            }
+        if (!buf) {
+            return ENA_ADMIN_MALFORMED_REQUEST;
+        }
+        ena_dma_read(s, buf, &key, sizeof(key));
+        if (le32_to_cpu(key.key_parts) != ENA_ADMIN_RSS_KEY_PARTS) {
+            return ENA_ADMIN_ILLEGAL_PARAMETER;
+        }
+        s->rss.key_parts = le32_to_cpu(key.key_parts);
+        for (i = 0; i < ENA_ADMIN_RSS_KEY_PARTS; i++) {
+            s->rss.key[i] = le32_to_cpu(key.key[i]);
         }
         s->rss.init_val = le32_to_cpu(c->u.flow_hash_func.init_val);
         return ENA_ADMIN_SUCCESS;
@@ -487,26 +512,26 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
 
     case ENA_ADMIN_RSS_HASH_INPUT: {
         struct ena_admin_feature_rss_hash_control hc;
+        uint16_t sel[ENA_ADMIN_RSS_PROTO_NUM];
 
         /*
          * The driver selects unsupported bits (L2, sorting) unconditionally;
          * they are masked. Address-only or port-only selections are rejected.
          */
         buf = ena_ctrl_buf(c->aq_common_descriptor.flags, &c->control_buffer, sizeof(hc));
-        if (buf) {
-            uint16_t sel[ENA_ADMIN_RSS_PROTO_NUM];
-
-            ena_dma_read(s, buf, &hc, sizeof(hc));
-            for (i = 0; i < ENA_ADMIN_RSS_PROTO_NUM; i++) {
-                sel[i] = le16_to_cpu(hc.selected_fields[i].fields) &
-                         ena_rss_supported_fields(i);
-                if (sel[i] != 0 && sel[i] != ENA_RSS_L3_FIELDS &&
-                    sel[i] != ENA_RSS_L3L4_FIELDS) {
-                    return ENA_ADMIN_ILLEGAL_PARAMETER;
-                }
-            }
-            memcpy(s->rss.fields, sel, sizeof(sel));
+        if (!buf) {
+            return ENA_ADMIN_MALFORMED_REQUEST;
         }
+        ena_dma_read(s, buf, &hc, sizeof(hc));
+        for (i = 0; i < ENA_ADMIN_RSS_PROTO_NUM; i++) {
+            sel[i] = le16_to_cpu(hc.selected_fields[i].fields) &
+                     ena_rss_supported_fields(i);
+            if (sel[i] != 0 && sel[i] != ENA_RSS_L3_FIELDS &&
+                sel[i] != ENA_RSS_L3L4_FIELDS) {
+                return ENA_ADMIN_ILLEGAL_PARAMETER;
+            }
+        }
+        memcpy(s->rss.fields, sel, sizeof(sel));
         return ENA_ADMIN_SUCCESS;
     }
 
@@ -516,6 +541,9 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         if (le16_to_cpu(c->u.ind_table.size) != ENA_RSS_IND_TBL_LOG_SIZE) {
             return ENA_ADMIN_ILLEGAL_PARAMETER;
         }
+        if (le32_to_cpu(c->u.ind_table.inline_index) != 0xffffffff) {
+            ena_unsupported("inline indirection table update");
+        }
         buf = ena_ctrl_buf(c->aq_common_descriptor.flags, &c->control_buffer, sizeof(tbl));
         if (!buf) {
             return ENA_ADMIN_ILLEGAL_PARAMETER;
@@ -523,7 +551,9 @@ static int ena_set_feature(EnaState *s, const struct ena_admin_aq_entry *cmd,
         ena_dma_read(s, buf, tbl, sizeof(tbl));
         /* entries name RX SQ indices; the ABI field is called cq_idx */
         for (i = 0; i < ENA_RSS_IND_TBL_SIZE; i++) {
-            if (le16_to_cpu(tbl[i].cq_idx) >= ENA_MAX_SQ) {
+            uint16_t idx = le16_to_cpu(tbl[i].cq_idx);
+
+            if (idx >= ENA_MAX_SQ || !s->sq[idx].used || s->sq[idx].is_tx) {
                 return ENA_ADMIN_ILLEGAL_PARAMETER;
             }
         }
@@ -548,6 +578,10 @@ static int ena_get_stats(EnaState *s, const struct ena_admin_aq_entry *cmd,
     if (c->type != ENA_ADMIN_GET_STATS_TYPE_BASIC) {
         return ENA_ADMIN_UNSUPPORTED_OPCODE;
     }
+    /* scope and queue_idx stay 0 in the driver's command and are ignored */
+    if (le16_to_cpu(c->device_id) != 0 && le16_to_cpu(c->device_id) != 0xffff) {
+        return ENA_ADMIN_ILLEGAL_PARAMETER;
+    }
     b->tx_bytes_low = cpu_to_le32(s->tx_bytes);
     b->tx_bytes_high = cpu_to_le32(s->tx_bytes >> 32);
     b->tx_pkts_low = cpu_to_le32(s->tx_pkts);
@@ -558,6 +592,8 @@ static int ena_get_stats(EnaState *s, const struct ena_admin_aq_entry *cmd,
     b->rx_pkts_high = cpu_to_le32(s->rx_pkts >> 32);
     b->rx_drops_low = cpu_to_le32(s->rx_drops);
     b->rx_drops_high = cpu_to_le32(s->rx_drops >> 32);
+    b->tx_drops_low = cpu_to_le32(s->tx_drops);
+    b->tx_drops_high = cpu_to_le32(s->tx_drops >> 32);
     return ENA_ADMIN_SUCCESS;
 }
 

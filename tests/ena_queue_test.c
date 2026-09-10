@@ -108,6 +108,8 @@ static void test_create_destroy_sq(void *obj, void *data, QGuestAllocator *alloc
     rx_idx = le16_to_cpu(sq.sq_idx);
     g_assert_cmpuint(rx_idx, !=, tx_idx);
     g_assert_cmphex(le32_to_cpu(sq.sq_doorbell_offset), ==, SQ_DB_BASE + rx_idx * 4);
+    /* the CQ stays busy while an SQ completes into it */
+    g_assert_cmpint(ena_destroy_cq(d, cq_idx), ==, ENA_ADMIN_RESOURCE_BUSY);
 
     /* destroy must name the right direction */
     g_assert_cmpint(ena_destroy_sq(d, tx_idx, false), ==, ENA_ADMIN_ILLEGAL_PARAMETER);
@@ -137,6 +139,14 @@ static void test_sq_bad_params(void *obj, void *data, QGuestAllocator *alloc)
                                   cq_idx, 1000, ring, &sq), ==,
                     ENA_ADMIN_ILLEGAL_PARAMETER);
     g_assert_cmpint(ena_create_sq(d, true, 0, cq_idx, 1024, ring, &sq), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
+    /* the SQ may not be deeper than its CQ; a host ring needs an address */
+    g_assert_cmpint(ena_create_cq(d, 16, 4, 1, ring, &cq), ==, ENA_ADMIN_SUCCESS);
+    g_assert_cmpint(ena_create_sq(d, true, ENA_ADMIN_PLACEMENT_POLICY_HOST,
+                                  le16_to_cpu(cq.cq_idx), 32, ring, &sq), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
+    g_assert_cmpint(ena_create_sq(d, true, ENA_ADMIN_PLACEMENT_POLICY_HOST,
+                                  cq_idx, 1024, 0, &sq), ==,
                     ENA_ADMIN_ILLEGAL_PARAMETER);
     /* device placement before the LLQ feature was negotiated */
     g_assert_cmpint(ena_create_sq(d, true, ENA_ADMIN_PLACEMENT_POLICY_DEV,

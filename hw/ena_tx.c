@@ -8,6 +8,7 @@
 #include "qemu/log.h"
 #include "hw/pci/pci.h"
 #include "net/eth.h"
+#include "net/checksum.h"
 #include "hw/net/net_tx_pkt.h"
 #include "hw/ena.h"
 
@@ -115,7 +116,8 @@ static bool ena_tx_parse(EnaState *s, const EnaSq *sq, EnaTxPkt *p)
     unsigned slot;
 
     memset(p, 0, sizeof(*p));
-    for (slot = 0; slot < ENA_MAX_PKT_DESCS; slot++) {
+    /* up to ENA_MAX_PKT_DESCS buffers plus one meta descriptor */
+    for (slot = 0; slot < ENA_MAX_PKT_DESCS + 1; slot++) {
         struct ena_eth_io_tx_desc d;
         uint32_t len_ctrl;
 
@@ -142,6 +144,9 @@ static bool ena_tx_parse(EnaState *s, const EnaSq *sq, EnaTxPkt *p)
                           "ena: tx packet without a first descriptor\n");
             return false;
         }
+        if (p->ndesc == ENA_MAX_PKT_DESCS) {
+            break;
+        }
         p->desc[p->ndesc++] = d;
         if (len_ctrl & ENA_ETH_IO_TX_DESC_LAST_MASK) {
             p->slots = slot + 1;
@@ -153,21 +158,61 @@ static bool ena_tx_parse(EnaState *s, const EnaSq *sq, EnaTxPkt *p)
     return false;
 }
 
-static void ena_tx_offloads(struct NetTxPkt *pkt, uint32_t meta_ctrl,
-                            uint16_t mss)
+#define ENA_TX_OFFLOAD_MASK \
+    (ENA_ETH_IO_TX_DESC_TSO_EN_MASK | ENA_ETH_IO_TX_DESC_L3_CSUM_EN_MASK | \
+     ENA_ETH_IO_TX_DESC_L4_CSUM_EN_MASK)
+
+/* L3/L4 protocols of the linear frame; IPv6 extension headers are not walked */
+static void ena_tx_frame_protos(const uint8_t *buf, size_t len, bool *ip4,
+                                uint8_t *l4)
 {
-    if (meta_ctrl & ENA_ETH_IO_TX_DESC_TSO_EN_MASK) {
-        if (net_tx_pkt_build_vheader(pkt, true, true, mss)) {
-            net_tx_pkt_update_ip_checksums(pkt);
-        }
+    struct iovec iov = { .iov_base = (void *)buf, .iov_len = len };
+    size_t l2;
+    uint16_t proto;
+
+    *ip4 = false;
+    *l4 = 0;
+    if (len < ETH_HLEN + 4) {
         return;
     }
-    if (meta_ctrl & ENA_ETH_IO_TX_DESC_L4_CSUM_EN_MASK) {
-        net_tx_pkt_build_vheader(pkt, false, true, 0);
+    l2 = eth_get_l2_hdr_length(buf);
+    proto = eth_get_l3_proto(&iov, 1, l2);
+    if (proto == ETH_P_IP && len >= l2 + sizeof(struct ip_header)) {
+        const struct ip_header *ip = (const void *)(buf + l2);
+        size_t ihl = IP_HDR_GET_LEN(buf + l2);
+
+        if (IP_HEADER_VERSION(ip) == 4 && ihl >= sizeof(*ip) && len >= l2 + ihl) {
+            *ip4 = true;
+            *l4 = ip->ip_p;
+        }
+    } else if (proto == ETH_P_IPV6 && len >= l2 + sizeof(struct ip6_header)) {
+        const struct ip6_header *ip6 = (const void *)(buf + l2);
+
+        *l4 = ip6->ip6_nxt;
     }
-    if (meta_ctrl & ENA_ETH_IO_TX_DESC_L3_CSUM_EN_MASK) {
-        net_tx_pkt_update_ip_hdr_checksum(pkt);
+}
+
+/* IPv4 header checksum in place; ip_len stays as the driver wrote it */
+static void ena_tx_ip4_csum(uint8_t *buf)
+{
+    uint8_t *ip = buf + eth_get_l2_hdr_length(buf);
+    struct ip_header *hdr = (void *)ip;
+
+    hdr->ip_sum = 0;
+    hdr->ip_sum = cpu_to_be16(net_raw_checksum(ip, IP_HDR_GET_LEN(ip)));
+}
+
+static bool ena_tx_offloads(struct NetTxPkt *pkt, uint32_t offloads,
+                            uint16_t mss)
+{
+    if (offloads & ENA_ETH_IO_TX_DESC_TSO_EN_MASK) {
+        if (!net_tx_pkt_build_vheader(pkt, true, true, mss)) {
+            return false;
+        }
+        net_tx_pkt_update_ip_checksums(pkt);
+        return true;
     }
+    return net_tx_pkt_build_vheader(pkt, false, true, 0);
 }
 
 static uint32_t ena_tx_desc_len(const struct ena_eth_io_tx_desc *d)
@@ -193,6 +238,9 @@ static void ena_tx_xmit(EnaState *s, const EnaSq *sq, const EnaTxPkt *p)
                        ENA_ETH_IO_TX_DESC_HEADER_LENGTH_SHIFT;
     g_autofree uint8_t *buf = NULL;
     size_t total = 0;
+    uint32_t offloads;
+    uint8_t l4;
+    bool ip4;
     unsigned i;
 
     if (!sq->llq && hdr_len) {
@@ -213,14 +261,6 @@ static void ena_tx_xmit(EnaState *s, const EnaSq *sq, const EnaTxPkt *p)
         qemu_log_mask(LOG_GUEST_ERROR, "ena: tx packet of %zu bytes\n", total);
         return;
     }
-    if ((meta_ctrl & ENA_ETH_IO_TX_DESC_TSO_EN_MASK) &&
-        (sq->meta.mss == 0 ||
-         ((meta_ctrl & ENA_ETH_IO_TX_DESC_L4_PROTO_IDX_MASK) >>
-          ENA_ETH_IO_TX_DESC_L4_PROTO_IDX_SHIFT) != ENA_ETH_IO_L4_PROTO_TCP)) {
-        qemu_log_mask(LOG_GUEST_ERROR, "ena: tso with mss %u meta_ctrl 0x%x\n",
-                      sq->meta.mss, meta_ctrl);
-        return;
-    }
 
     buf = g_malloc(total);
     if (hdr_len) {
@@ -239,13 +279,52 @@ static void ena_tx_xmit(EnaState *s, const EnaSq *sq, const EnaTxPkt *p)
         memcmp(buf + ETH_ALEN, s->conf.macaddr.a, ETH_ALEN)) {
         return;
     }
+    offloads = meta_ctrl & ENA_TX_OFFLOAD_MASK;
+    if (!(offloads & ENA_ETH_IO_TX_DESC_TSO_EN_MASK) &&
+        total > s->mtu + ETH_HLEN + 4) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: tx frame of %zu bytes over mtu %u\n",
+                      total, s->mtu);
+        s->tx_drops++;
+        return;
+    }
+    ena_tx_frame_protos(buf, total, &ip4, &l4);
+    if ((offloads & ENA_ETH_IO_TX_DESC_TSO_EN_MASK) &&
+        (sq->meta.mss == 0 || l4 != IP_PROTO_TCP)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: tso with mss %u on l4 proto %u\n",
+                      sq->meta.mss, l4);
+        s->tx_drops++;
+        return;
+    }
+    if ((offloads & ENA_ETH_IO_TX_DESC_L3_CSUM_EN_MASK) && !ip4) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: l3 checksum on a non-IPv4 frame\n");
+        offloads &= ~ENA_ETH_IO_TX_DESC_L3_CSUM_EN_MASK;
+    }
+    if ((offloads & ENA_ETH_IO_TX_DESC_L4_CSUM_EN_MASK) &&
+        l4 != IP_PROTO_TCP && l4 != IP_PROTO_UDP) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: l4 checksum on l4 proto %u\n", l4);
+        offloads &= ~ENA_ETH_IO_TX_DESC_L4_CSUM_EN_MASK;
+    }
+    if ((offloads & ENA_ETH_IO_TX_DESC_L3_CSUM_EN_MASK) &&
+        !(offloads & ENA_ETH_IO_TX_DESC_TSO_EN_MASK)) {
+        ena_tx_ip4_csum(buf);
+        offloads &= ~ENA_ETH_IO_TX_DESC_L3_CSUM_EN_MASK;
+    }
+    /* frames without L4 work go out verbatim */
+    if (!offloads) {
+        qemu_send_packet(qemu_get_queue(s->nic), buf, total);
+        s->tx_pkts++;
+        s->tx_bytes += total;
+        return;
+    }
+
     net_tx_pkt_add_raw_fragment(pkt, buf, total);
-    if (net_tx_pkt_parse(pkt)) {
-        ena_tx_offloads(pkt, meta_ctrl, sq->meta.mss);
-        if (net_tx_pkt_send(pkt, qemu_get_queue(s->nic))) {
-            s->tx_pkts++;
-            s->tx_bytes += net_tx_pkt_get_total_len(pkt);
-        }
+    if (!net_tx_pkt_parse(pkt) || !ena_tx_offloads(pkt, offloads, sq->meta.mss)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: offload 0x%x on an unparsable frame\n",
+                      offloads);
+        s->tx_drops++;
+    } else if (net_tx_pkt_send(pkt, qemu_get_queue(s->nic))) {
+        s->tx_pkts++;
+        s->tx_bytes += net_tx_pkt_get_total_len(pkt);
     }
     net_tx_pkt_reset(pkt, ena_tx_free_frag, NULL);
 }

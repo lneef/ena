@@ -203,7 +203,11 @@ static void test_rss_features(void *obj, void *data, QGuestAllocator *alloc)
     struct ena_admin_feature_rss_flow_hash_control key;
     struct ena_admin_feature_rss_hash_control hc;
     struct ena_admin_rss_ind_table_entry tbl[128];
+    struct ena_admin_acq_create_cq_resp_desc cq;
+    struct ena_admin_acq_create_sq_resp_desc sq;
     uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t ring = guest_alloc(alloc, 16 * 64);
+    uint16_t rx_sq[4], tx_sq;
     int i;
 
     ena_bringup(d);
@@ -311,8 +315,20 @@ static void test_rss_features(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(le16_to_cpu(resp.u.ind_table.size), ==, 7);
     g_assert_cmphex(le32_to_cpu(resp.u.ind_table.inline_index), ==, 0xffffffff);
 
+    /* entries name RX submission queues, which must exist */
+    g_assert_cmpint(ena_create_cq(d, 16, 4, 1, ring, &cq), ==, ENA_ADMIN_SUCCESS);
+    g_assert_cmpint(ena_create_sq(d, true, ENA_ADMIN_PLACEMENT_POLICY_HOST,
+                                  le16_to_cpu(cq.cq_idx), 16, ring, &sq), ==,
+                    ENA_ADMIN_SUCCESS);
+    tx_sq = le16_to_cpu(sq.sq_idx);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmpint(ena_create_sq(d, false, ENA_ADMIN_PLACEMENT_POLICY_HOST,
+                                      le16_to_cpu(cq.cq_idx), 16, ring, &sq), ==,
+                        ENA_ADMIN_SUCCESS);
+        rx_sq[i] = le16_to_cpu(sq.sq_idx);
+    }
     for (i = 0; i < 128; i++) {
-        tbl[i].cq_idx = cpu_to_le16(i % 4);
+        tbl[i].cq_idx = cpu_to_le16(rx_sq[i % 4]);
         tbl[i].reserved = 0;
     }
     qtest_memwrite(d->dev.bus->qts, buf, tbl, sizeof(tbl));
@@ -324,13 +340,24 @@ static void test_rss_features(void *obj, void *data, QGuestAllocator *alloc)
                     ENA_ADMIN_ILLEGAL_PARAMETER);
     cmd.u.ind_table.size = cpu_to_le16(7);
     g_assert_cmpint(ena_set_feature(d, &cmd, buf, sizeof(tbl)), ==, ENA_ADMIN_SUCCESS);
+    /* a TX queue or an unused slot is not a valid entry */
+    tbl[5].cq_idx = cpu_to_le16(tx_sq);
+    qtest_memwrite(d->dev.bus->qts, buf, tbl, sizeof(tbl));
+    g_assert_cmpint(ena_set_feature(d, &cmd, buf, sizeof(tbl)), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
+    tbl[5].cq_idx = cpu_to_le16(15);
+    qtest_memwrite(d->dev.bus->qts, buf, tbl, sizeof(tbl));
+    g_assert_cmpint(ena_set_feature(d, &cmd, buf, sizeof(tbl)), ==,
+                    ENA_ADMIN_ILLEGAL_PARAMETER);
+    tbl[5].cq_idx = cpu_to_le16(rx_sq[1]);
+    qtest_memwrite(d->dev.bus->qts, buf, tbl, sizeof(tbl));
     qtest_memset(d->dev.bus->qts, buf, 0xff, sizeof(tbl));
     g_assert_cmpint(ena_get_feature(d, ENA_ADMIN_RSS_INDIRECTION_TABLE_CONFIG,
                                     0, buf, sizeof(tbl), &resp), ==,
                     ENA_ADMIN_SUCCESS);
     qtest_memread(d->dev.bus->qts, buf, tbl, sizeof(tbl));
     for (i = 0; i < 128; i++) {
-        g_assert_cmpuint(le16_to_cpu(tbl[i].cq_idx), ==, i % 4);
+        g_assert_cmpuint(le16_to_cpu(tbl[i].cq_idx), ==, rx_sq[i % 4]);
     }
     tbl[5].cq_idx = cpu_to_le16(0xffff);
     qtest_memwrite(d->dev.bus->qts, buf, tbl, sizeof(tbl));
