@@ -128,6 +128,7 @@ static void ena_cq_unmask_write(EnaState *s, EnaCq *cq, uint32_t val)
     EnaIrq *irq;
 
     if (!cq->used || cq->msix_vector >= ENA_MSIX_VECTORS) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: unmask of cq without vector\n");
         return;
     }
     irq = &s->irq[cq->msix_vector];
@@ -163,7 +164,12 @@ void ena_aenq_post(EnaState *s, uint16_t group, uint16_t syndrome,
     if (!base || !depth || !(s->aenq_groups & BIT(group))) {
         return;
     }
-    if ((uint16_t)(head_db - s->aenq_tail) == 0) {
+    if ((uint16_t)(head_db - s->aenq_tail) > depth) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: aenq head %u past depth %u\n",
+                      head_db, depth);
+        return;
+    }
+    if (head_db == s->aenq_tail) {
         return;
     }
 
@@ -311,7 +317,8 @@ static uint32_t ena_reg_file_read(EnaState *s, uint32_t off)
     if (off < ENA_REG_FILE_SIZE) {
         return REG(s, off);
     }
-    return 0;
+    qemu_log_mask(LOG_GUEST_ERROR, "ena: read of register 0x%x\n", off);
+    return 0xffffffff;
 }
 
 static void ena_mmio_readless(EnaState *s, uint32_t req)
@@ -324,10 +331,12 @@ static void ena_mmio_readless(EnaState *s, uint32_t req)
     struct ena_admin_ena_mmio_req_read_less_resp resp = {
         .req_id = cpu_to_le16(req_id),
         .reg_off = cpu_to_le16(off),
-        .reg_val = cpu_to_le32(ena_reg_file_read(s, off & ~3)),
+        .reg_val = cpu_to_le32(ena_reg_file_read(s, off)),
     };
 
-    if (!resp_addr) {
+    if (!resp_addr || (off & 3)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: readless request 0x%x resp 0x%"
+                      PRIx64 "\n", req, resp_addr);
         return;
     }
     ena_dma_write(s, resp_addr, &resp, sizeof(resp));
@@ -346,9 +355,25 @@ static void ena_dev_ctl_write(EnaState *s, uint32_t val)
         REG(s, ENA_REGS_DEV_STS_OFF) = ENA_REGS_DEV_STS_RESET_IN_PROGRESS_MASK;
         return;
     }
-    REG(s, ENA_REGS_DEV_CTL_OFF) = val;
+    if (val) {
+        ena_unsupported("DEV_CTL reason without reset 0x%x", val);
+    }
+    /* the write of 0 completes the reset handshake */
+    REG(s, ENA_REGS_DEV_CTL_OFF) = 0;
     if (REG(s, ENA_REGS_DEV_STS_OFF) & ENA_REGS_DEV_STS_RESET_IN_PROGRESS_MASK) {
         REG(s, ENA_REGS_DEV_STS_OFF) = ENA_REGS_DEV_STS_READY_MASK;
+    }
+}
+
+/* AQ, ACQ and AENQ: 64-byte entries, power-of-two depth. */
+static void ena_check_queue_caps(uint32_t val)
+{
+    uint16_t depth = val & ENA_REGS_AQ_CAPS_AQ_DEPTH_MASK;
+    uint32_t entry = (val & ENA_REGS_AQ_CAPS_AQ_ENTRY_SIZE_MASK) >>
+                     ENA_REGS_AQ_CAPS_AQ_ENTRY_SIZE_SHIFT;
+
+    if (entry != sizeof(struct ena_admin_aq_entry) || !is_power_of_2(depth)) {
+        ena_unsupported("queue caps 0x%x", val);
     }
 }
 
@@ -368,6 +393,7 @@ static void ena_reg_write(void *opaque, hwaddr addr, uint64_t val64,
         EnaSq *sq = &s->sq[(addr - ENA_REG_SQ_DB_BASE) / 4];
 
         if (!sq->used) {
+            qemu_log_mask(LOG_GUEST_ERROR, "ena: doorbell for unused sq\n");
             return;
         }
         if ((uint16_t)(val - sq->head) > sq->depth) {
@@ -413,16 +439,19 @@ static void ena_reg_write(void *opaque, hwaddr addr, uint64_t val64,
         ena_admin_process(s);
         break;
     case ENA_REGS_AQ_CAPS_OFF:
+        ena_check_queue_caps(val);
         REG(s, addr) = val;
         s->aq_head = 0;
         break;
     case ENA_REGS_ACQ_CAPS_OFF:
+        ena_check_queue_caps(val);
         REG(s, addr) = val;
         s->acq_tail = 0;
         s->acq_phase = true;
         REG(s, ENA_REGS_ACQ_TAIL_OFF) = 0;
         break;
     case ENA_REGS_AENQ_CAPS_OFF:
+        ena_check_queue_caps(val);
         REG(s, addr) = val;
         s->aenq_tail = 0;
         s->aenq_phase = true;
@@ -437,7 +466,12 @@ static void ena_reg_write(void *opaque, hwaddr addr, uint64_t val64,
     case ENA_REGS_AENQ_BASE_LO_OFF:
     case ENA_REGS_AENQ_BASE_HI_OFF:
     case ENA_REGS_AENQ_HEAD_DB_OFF:
+        REG(s, addr) = val;
+        break;
     case ENA_REGS_INTR_MASK_OFF:
+        if (val & ~1u) {
+            ena_unsupported("INTR_MASK write 0x%x", val);
+        }
         REG(s, addr) = val;
         break;
     default:

@@ -398,6 +398,21 @@ static void test_queue_wrap(void *obj, void *data, QGuestAllocator *alloc)
                      3 * ENA_TEST_AQ_DEPTH + 5);
 }
 
+/* A doorbell more than depth ahead of the device head is ignored. */
+static void test_doorbell_past_depth(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    struct ena_admin_get_feat_resp resp;
+
+    ena_bringup(d);
+    ena_reg_write(d, ENA_REGS_AQ_DB_OFF, ENA_TEST_AQ_DEPTH + 1);
+    g_assert_cmpuint(ena_reg_read(d, ENA_REGS_ACQ_TAIL_OFF), ==, 0);
+    g_assert_cmpint(ena_get_feature(d, ENA_ADMIN_LINK_CONFIG, 0, 0, 0, &resp),
+                    ==, ENA_ADMIN_SUCCESS);
+    g_assert_cmpuint(le16_to_cpu(resp.acq_common_desc.sq_head_indx), ==, 1);
+}
+
 static void test_admin_interrupt(void *obj, void *data, QGuestAllocator *alloc)
 {
     QEna *d = obj;
@@ -449,6 +464,8 @@ static void register_ena_admin_test(void)
     qos_add_test("admin/get-stats", "ena", test_get_stats, &opts);
     qos_add_test("admin/bad-commands", "ena", test_bad_commands, &opts);
     qos_add_test("admin/queue-wrap", "ena", test_queue_wrap, &opts);
+    qos_add_test("admin/doorbell-past-depth", "ena", test_doorbell_past_depth,
+                 &opts);
     qos_add_test("admin/interrupt", "ena", test_admin_interrupt, &opts);
     qos_add_test("admin/doorbell-without-queue", "ena",
                  test_doorbell_without_queue, &opts);

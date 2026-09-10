@@ -598,6 +598,11 @@ void ena_admin_process(EnaState *s)
     if (!aq_base || !acq_base || !aq_depth || !acq_depth) {
         return;
     }
+    if ((uint16_t)(tail - s->aq_head) > aq_depth) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ena: aq doorbell %u past depth %u\n",
+                      tail, aq_depth);
+        return;
+    }
 
     while (s->aq_head != tail) {
         struct ena_admin_aq_entry cmd;

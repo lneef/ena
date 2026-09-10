@@ -89,6 +89,24 @@ static void test_masked_interrupt(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_false(ena_msix_fired(d, ENA_TEST_ADMIN_VECTOR));
 }
 
+/* A head doorbell more than depth ahead of the tail grants no credit. */
+static void test_head_past_depth(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    struct ena_admin_aenq_entry e;
+
+    ena_bringup(d);
+    set_aenq_groups(d, BIT(ENA_ADMIN_KEEP_ALIVE));
+    ena_reg_write(d, ENA_REGS_AENQ_HEAD_DB_OFF, ENA_TEST_AENQ_DEPTH + 1);
+    qtest_clock_step(d->dev.bus->qts, KEEP_ALIVE_NS);
+    g_assert_false(ena_aenq_poll(d, &e));
+    g_assert_cmpuint(ena_reg_read(d, ENA_REGS_AENQ_TAIL_OFF), ==, 0);
+
+    ena_reg_write(d, ENA_REGS_AENQ_HEAD_DB_OFF, ENA_TEST_AENQ_DEPTH);
+    qtest_clock_step(d->dev.bus->qts, KEEP_ALIVE_NS);
+    g_assert_true(ena_aenq_poll(d, &e));
+}
+
 static void test_queue_full_and_wrap(void *obj, void *data,
                                      QGuestAllocator *alloc)
 {
@@ -152,6 +170,7 @@ static void register_ena_aenq_test(void)
     qos_add_test("aenq/link-change", "ena", test_link_change, &opts);
     qos_add_test("aenq/keep-alive", "ena", test_keep_alive, &opts);
     qos_add_test("aenq/masked-interrupt", "ena", test_masked_interrupt, &opts);
+    qos_add_test("aenq/head-past-depth", "ena", test_head_past_depth, &opts);
     qos_add_test("aenq/queue-full-and-wrap", "ena", test_queue_full_and_wrap,
                  &opts);
     qos_add_test("aenq/events-before-enable-dropped", "ena",

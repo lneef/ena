@@ -84,6 +84,9 @@ static void test_readless(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmphex(ena_reg_read(d, ENA_REGS_MMIO_REG_READ_OFF) >>
                     ENA_REGS_MMIO_REG_READ_REG_OFF_SHIFT, ==, ENA_REGS_DEV_STS_OFF);
 
+    /* an offset outside the register file reads as a failed request */
+    g_assert_cmphex(ena_readless(d, 0x80), ==, 0xffffffff);
+
     /* a cleared response address disables readless: no DMA happens */
     ena_reg_write(d, ENA_REGS_MMIO_RESP_LO_OFF, 0);
     ena_reg_write(d, ENA_REGS_MMIO_RESP_HI_OFF, 0);
