@@ -4,3 +4,4 @@
 docs/
 wiki
 nix-make.sh
+compile_commands.json
