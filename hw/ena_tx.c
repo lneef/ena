@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/pci/pci.h"
+#include "net/eth.h"
 #include "hw/net/net_tx_pkt.h"
 #include "hw/ena.h"
 
@@ -222,6 +223,11 @@ static void ena_tx_xmit(EnaState *s, const EnaSq *sq, const EnaTxPkt *p)
         total += len;
     }
 
+    /* The fabric drops frames with a foreign source MAC. */
+    if (total < ETH_HLEN ||
+        memcmp(buf + ETH_ALEN, s->conf.macaddr.a, ETH_ALEN)) {
+        return;
+    }
     net_tx_pkt_add_raw_fragment(pkt, buf, total);
     if (net_tx_pkt_parse(pkt)) {
         ena_tx_offloads(pkt, meta_ctrl, sq->meta.mss);

@@ -821,6 +821,42 @@ static void test_rx_intr_shared_vector(void *obj, void *data,
     g_assert_true(ena_msix_fired(d, 1));
 }
 
+/* Frames for a foreign unicast MAC never reach the queues or the counters. */
+static void test_rx_mac_filter(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    RxRing r;
+    struct ena_eth_io_rx_cdesc_base c;
+    const Flow flow = { 0x0a000001, 0x0a000002, 1000, 2000 };
+    static const uint8_t foreign[ETH_ALEN] = { 0x52, 0x54, 0, 0x99, 0x99, 0x99 };
+    static const uint8_t bcast[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    static const uint8_t mcast[ETH_ALEN] = { 0x01, 0x00, 0x5e, 0, 0, 1 };
+    uint8_t frame[128];
+    uint32_t pkts, bytes, drops;
+    size_t len = build_udp(frame, &flow, 16);
+
+    ena_bringup(d);
+    rx_ring_init(&r, d, data, alloc, 16, 16, 4, 0xffffffff, 2048);
+    rx_post(&r, 8);
+
+    memcpy(frame, foreign, ETH_ALEN);
+    ena_backend_send(r.fd, frame, len);
+    rx_settle(&r);
+    g_assert_false(rx_cq_next(&r, &c));
+    rx_get_stats(d, &pkts, &bytes, &drops);
+    g_assert_cmpuint(pkts, ==, 0);
+    g_assert_cmpuint(drops, ==, 0);
+
+    memcpy(frame, bcast, ETH_ALEN);
+    ena_backend_send(r.fd, frame, len);
+    rx_wait_cdesc(&r, &c);
+    memcpy(frame, mcast, ETH_ALEN);
+    ena_backend_send(r.fd, frame, len);
+    rx_wait_cdesc(&r, &c);
+    rx_get_stats(d, &pkts, &bytes, &drops);
+    g_assert_cmpuint(pkts, ==, 2);
+}
+
 static void test_rx_checksums(void *obj, void *data, QGuestAllocator *alloc)
 {
     QEna *d = obj;
@@ -1075,6 +1111,7 @@ static void register_ena_rxpath_test(void)
     qos_add_test("rxpath/intr-disabled", "ena", test_rx_intr_disabled, &opts);
     qos_add_test("rxpath/intr-shared-vector", "ena",
                  test_rx_intr_shared_vector, &opts);
+    qos_add_test("rxpath/mac-filter", "ena", test_rx_mac_filter, &opts);
     qos_add_test("rxpath/checksums", "ena", test_rx_checksums, &opts);
     qos_add_test("rxpath/rss", "ena", test_rx_rss, &opts);
     qos_add_test("rxpath/rss-fields", "ena", test_rx_rss_fields, &opts);

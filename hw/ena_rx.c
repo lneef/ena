@@ -259,6 +259,11 @@ ssize_t ena_rx_receive_iov(EnaState *s, const struct iovec *iov, int iovcnt)
     }
 
     iov_to_buf(iov, iovcnt, 0, frame, len);
+    /* The fabric only delivers frames for our MAC, broadcast and multicast. */
+    if (len < ETH_HLEN ||
+        (!(frame[0] & 1) && memcmp(frame, s->conf.macaddr.a, ETH_ALEN))) {
+        return len;
+    }
     net_rx_pkt_attach_data(s->rx_pkt, frame, len, false);
     hash = ena_rss_hash(s);
 

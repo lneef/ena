@@ -308,6 +308,29 @@ static void test_malformed(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(ena_backend_recv(ena_backend_fd(data), rx, sizeof(rx)), ==, -1);
 }
 
+/* A foreign source MAC is completed by the NIC but dropped by the fabric. */
+static void test_source_mac_filter(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QEna *d = obj;
+    EnaTxQueue q;
+    struct ena_eth_io_tx_cdesc c;
+    uint8_t frame[128];
+    uint8_t rx[128];
+    size_t len = ena_build_eth(frame, 64);
+    uint64_t buf = guest_alloc(alloc, len);
+
+    memset(frame + ETH_ALEN, 0xaa, ETH_ALEN);
+    ena_bringup(d);
+    ena_txq_create(d, &q, 1024, 2, NO_VECTOR, false);
+    qtest_memwrite(d->dev.bus->qts, buf, frame, len);
+
+    send_single(d, &q, buf, len, 3);
+    g_assert_cmpint(ena_backend_recv(ena_backend_fd(data), rx, sizeof(rx)), ==, -1);
+    g_assert_true(ena_txq_poll_cdesc(d, &q, &c));
+    g_assert_cmpuint(le16_to_cpu(c.req_id), ==, 3);
+}
+
 static void register_ena_txpath_test(void)
 {
     QOSGraphTestOptions opts = {
@@ -315,6 +338,8 @@ static void register_ena_txpath_test(void)
     };
 
     qos_add_test("txpath/single-frame", "ena", test_single_frame, &opts);
+    qos_add_test("txpath/source-mac-filter", "ena", test_source_mac_filter,
+                 &opts);
     qos_add_test("txpath/multi-desc", "ena", test_multi_desc, &opts);
     qos_add_test("txpath/meta-and-no-completion", "ena",
                  test_meta_and_no_completion, &opts);

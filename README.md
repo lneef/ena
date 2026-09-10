@@ -70,6 +70,10 @@ python3 tests/system/ena_multiqueue_test.py --rx-irq
 If the host drops datagrams before QEMU reads them (the test reports
 `RcvbufErrors`), slow the senders down with `--pace-us 20000`.
 
+The device mirrors the EC2 fabric filters: received frames are delivered only
+for its own MAC, broadcast and multicast, and transmitted frames with a foreign
+source MAC are completed but dropped.
+
 Device properties: `llq-large-header=on|off` (default off) selects whether the
 device recommends 256-byte or 128-byte LLQ entries; both sizes are supported.
 
